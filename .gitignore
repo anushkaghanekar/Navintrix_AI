@@ -1,0 +1,31 @@
+# Node.js
+node_modules/
+npm-debug.log*
+package-lock.json
+
+# Environment Variables
+.env
+.env.local
+
+# Build Output
+build/
+dist/
+
+# Python
+__pycache__/
+*.pyc
+venv/
+
+# VS Code
+.vscode/
+
+# Operating System Files
+.DS_Store
+Thumbs.db
+
+# Logs
+logs/
+*.log
+
+# Coverage
+coverage/
