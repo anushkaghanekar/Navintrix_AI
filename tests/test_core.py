@@ -471,3 +471,149 @@ def test_tracker_reset_restarts_ids():
     assert [tv.track_id for tv in tracker.update([_mkdet("car", 0.9, *box)], 0)] == [1]
     tracker.reset()
     assert [tv.track_id for tv in tracker.update([_mkdet("car", 0.9, *box)], 0)] == [1]
+
+
+# ---------------------------------------------------------------------------
+# counting/roi.py + counting/counter.py + counting/movement.py
+# ---------------------------------------------------------------------------
+
+def _load_intersection():
+    from pathlib import Path
+
+    from counting.roi import load_roi_config
+
+    repo_root = Path(__file__).resolve().parent.parent
+    return load_roi_config(str(repo_root / "configs" / "intersection.yaml"))
+
+
+def test_roi_assigns_road_by_polygon():
+    from counting.roi import assign_road
+
+    cfg = _load_intersection()
+    assert assign_road((400, 150), cfg) == "north"    # top approach
+    assert assign_road((400, 850), cfg) == "south"    # bottom approach
+    assert assign_road((150, 500), cfg) == "west"     # left approach
+    assert assign_road((850, 400), cfg) == "east"     # right approach
+    assert assign_road((480, 480), cfg) is None       # intersection center gap
+
+
+def test_roi_config_validation_requires_all_roads():
+    from counting.roi import load_roi_config
+
+    # Missing a required road should raise.
+    import tempfile
+    import textwrap
+
+    temp = tempfile.NamedTemporaryFile("w", suffix=".yaml", delete=False)
+    temp.write(
+        textwrap.dedent(
+            """\
+            roads:
+              north:
+                roi: [[0,0],[1,0],[1,1],[0,1]]
+                queue_roi: []
+                counting_line: []
+                allowed_movements: [straight]
+            """
+        )
+    )
+    temp.close()
+    try:
+        import pytest
+
+        with pytest.raises(ValueError):
+            load_roi_config(temp.name)
+    finally:
+        import os
+
+        os.unlink(temp.name)
+
+
+def test_crosses_counting_line_segment_intersection():
+    from counting.roi import crosses_counting_line
+
+    cfg = _load_intersection()
+    # North counting_line is y=200 between x=360..600.
+    # Moving from (480, 300) to (480, 400) never touches y=200 -> no crossing.
+    assert not crosses_counting_line((480, 300), (480, 400), "north", cfg)
+    # Moving from (480, 300) to (480, 150) crosses y=200.
+    assert crosses_counting_line((480, 300), (480, 150), "north", cfg)
+    # A lane shift that stays below the line does not cross it.
+    assert not crosses_counting_line((360, 120), (480, 150), "north", cfg)
+    # An unknown / unconfigured road must not raise — it just never crosses.
+    assert not crosses_counting_line((480, 300), (480, 150), "", cfg)
+    assert not crosses_counting_line((480, 300), (480, 150), "bogus", cfg)
+
+
+def test_counter_counts_track_once_not_per_frame():
+    from counting.counter import VehicleCounter
+    from tracking.bytetrack import TrackedVehicle
+
+    counter = VehicleCounter()
+    # 50 frames of the same track on the same road, all crossing the line:
+    # must result in exactly 1 count.
+    for t in range(50):
+        counter.update(
+            TrackedVehicle(
+                track_id=7, cls="car", confidence=0.9,
+                current_position=(400, 150),
+                previous_position=(400, 250),
+                first_seen_time=0, last_seen_time=t,
+                road="north",
+            ),
+            crossed_counting_line=True,
+        )
+    assert counter.counts_by_road == {"north": 1, "south": 0, "east": 0, "west": 0}
+    assert counter.counts_by_class == {"car": 1}
+
+
+def test_counter_separates_vehicles_by_track_id():
+    from counting.counter import VehicleCounter
+    from tracking.bytetrack import TrackedVehicle
+
+    counter = VehicleCounter()
+    base = dict(
+        confidence=0.9,
+        current_position=(400, 150),
+        previous_position=(400, 200),
+        first_seen_time=0, last_seen_time=0,
+        road="north",
+    )
+    counter.update(TrackedVehicle(track_id=1, cls="car", **base), True)
+    counter.update(TrackedVehicle(track_id=2, cls="truck", **base), True)
+    # Same track_id crosses again -> no increment.
+    counter.update(TrackedVehicle(track_id=1, cls="car", **base), True)
+    assert counter.counts_by_road == {"north": 2, "south": 0, "east": 0, "west": 0}
+    assert counter.counts_by_class == {"car": 1, "truck": 1}
+
+
+def test_counter_ignores_non_crossing_and_unassigned_road():
+    from counting.counter import VehicleCounter
+    from tracking.bytetrack import TrackedVehicle
+
+    counter = VehicleCounter()
+    base = dict(
+        track_id=1, cls="car", confidence=0.9,
+        current_position=(0, 150), previous_position=(0, 200),
+        first_seen_time=0, last_seen_time=0,
+    )
+    counter.update(TrackedVehicle(road="north", **base), False)  # not crossing -> no count
+    assert counter.counts_by_road["north"] == 0
+    counter.update(TrackedVehicle(road=None, **base), True)  # road unknown -> "unassigned"
+    assert counter.counts_by_road.get("unassigned") == 1
+
+
+def test_movement_classify_uses_config_table():
+    from counting.movement import classify_movement
+
+    table = {
+        "east": {"west": "straight", "north": "left", "south": "right"},
+        "north": {"south": "straight", "east": "left", "west": "right"},
+    }
+    assert classify_movement("east", "west", table) == "straight"
+    assert classify_movement("east", "north", table) == "left"
+    assert classify_movement("north", "west", table) == "right"
+    assert classify_movement("east", "east", table) == "unknown"  # no U-turn
+
+    # Default table comes from configs/intersection.yaml.
+    assert classify_movement("west", "east") == "straight"

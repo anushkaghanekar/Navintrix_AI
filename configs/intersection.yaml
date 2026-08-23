@@ -2,6 +2,12 @@
 # Fill in real pixel (or, if calibrated, real-world) coordinates per camera —
 # never hardcode these in application code. One file per intersection means
 # the same codebase can support a second intersection by adding a file here.
+#
+# The polygons below are PLACEHOLDER synthetic coordinates for a 960x960
+# image with the intersection centered at ~(480, 480). They exist so the
+# pipeline runs end-to-end during development; replace them with actual
+# per-camera values before any real evaluation. The geometry follows
+# right-hand traffic with north/south the vertical axis.
 
 intersection:
   name: main_intersection
@@ -9,28 +15,42 @@ intersection:
 
 roads:
   north:
-    roi: []                # polygon points bounding the approach
-    queue_roi: []           # sub-region used for queue-length estimation
-    counting_line: []       # line vehicles cross to be counted
+    # approach on the top edge; vehicles travel south toward (480, 480)
+    roi: [[320, 0], [640, 0], [600, 300], [360, 300]]
+    queue_roi: [[360, 60], [600, 60], [600, 220], [360, 220]]
+    counting_line: [[360, 200], [600, 200]]
     allowed_movements: [straight, left, right]
 
   south:
-    roi: []
-    queue_roi: []
-    counting_line: []
+    # approach on the bottom edge; vehicles travel north toward (480, 480)
+    roi: [[320, 960], [640, 960], [600, 680], [360, 680]]
+    queue_roi: [[360, 740], [600, 740], [600, 900], [360, 900]]
+    counting_line: [[360, 760], [600, 760]]
     allowed_movements: [straight, left, right]
 
   east:
-    roi: []
-    queue_roi: []
-    counting_line: []
+    # approach on the right edge; vehicles travel west toward (480, 480)
+    roi: [[960, 320], [960, 640], [680, 600], [680, 360]]
+    queue_roi: [[740, 360], [740, 600], [900, 600], [900, 360]]
+    counting_line: [[720, 360], [720, 600]]
     allowed_movements: [straight, left, right]
 
   west:
-    roi: []
-    queue_roi: []
-    counting_line: []
+    # approach on the left edge; vehicles travel east toward (480, 480)
+    roi: [[0, 320], [0, 640], [280, 600], [280, 360]]
+    queue_roi: [[60, 360], [60, 600], [220, 600], [220, 360]]
+    counting_line: [[240, 360], [240, 600]]
     allowed_movements: [straight, left, right]
+
+# Entry-road -> exit-road -> movement label. Right-hand traffic, N-S vertical.
+#   From the north, going south is straight; turning east = left (CCW);
+#   turning west = right (CW). A second intersection with different geometry
+#   or traffic rules only changes this table.
+movement_directions:
+  north: {south: straight, east: left, west: right}
+  south: {north: straight, west: left, east: right}
+  east: {west: straight, south: left, north: right}
+  west: {east: straight, north: left, south: right}
 
 # density = car_count + motorcycle_weight*motorcycle_count
 #         + bus_weight*bus_count + truck_weight*truck_count
