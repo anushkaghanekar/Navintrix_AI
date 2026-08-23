@@ -310,3 +310,164 @@ def test_run_on_video_raises_for_unopenable_source(tmp_path):
 
     with pytest.raises(IOError):
         run_on_video(str(tmp_path / "does_not_exist.mp4"), object(), lambda *a: None)
+
+
+# ---------------------------------------------------------------------------
+# tracking/bytetrack.py
+# ---------------------------------------------------------------------------
+
+def _mkdet(cls, conf, x1, y1, x2, y2):
+    from detection.detector import Detection
+
+    return Detection(cls, conf, x1, y1, x2, y2)
+
+
+def test_tracker_assigns_stable_id_across_frames():
+    from tracking.bytetrack import VehicleTracker
+
+    tracker = VehicleTracker(track_buffer=30, match_thresh=0.8)
+    box = (100, 100, 200, 200)
+    ids = []
+    for t in range(3):
+        out = tracker.update([_mkdet("car", 0.9, *box)], timestamp=t)
+        ids.append([tv.track_id for tv in out])
+    assert ids == [[1], [1], [1]]
+
+
+def test_tracker_survives_temporary_occlusion():
+    from tracking.bytetrack import VehicleTracker
+
+    tracker = VehicleTracker(track_buffer=30, match_thresh=0.8)
+    box = (100, 100, 200, 200)
+
+    out0 = tracker.update([_mkdet("car", 0.9, *box)], timestamp=0)
+    out1 = tracker.update([_mkdet("car", 0.9, *box)], timestamp=1)
+    out2 = tracker.update([], timestamp=2)                      # occluded
+    out3 = tracker.update([_mkdet("car", 0.9, *box)], timestamp=3)  # reappears
+
+    assert [tv.track_id for tv in out0] == [1]
+    assert [tv.track_id for tv in out1] == [1]
+    assert out2 == []  # lost track is withheld while not visible
+    assert [tv.track_id for tv in out3] == [1]  # same ID, no double-count
+    reappeared = out3[0]
+    assert reappeared.previous_position is not None  # last known position preserved
+    assert reappeared.first_seen_time == 0.0
+    assert reappeared.last_seen_time == 3.0
+
+
+def test_tracker_distinct_vehicles_get_distinct_ids():
+    from tracking.bytetrack import VehicleTracker
+
+    tracker = VehicleTracker(track_buffer=10, match_thresh=0.8)
+    out = tracker.update(
+        [_mkdet("car", 0.9, 0, 0, 50, 50), _mkdet("bus", 0.9, 300, 300, 400, 400)],
+        timestamp=0,
+    )
+    ids = [tv.track_id for tv in out]
+    assert ids == [1, 2]
+    # Swap detection order next frame; IDs stay glued to physical position.
+    out1 = tracker.update(
+        [_mkdet("bus", 0.9, 300, 300, 400, 400), _mkdet("car", 0.9, 0, 0, 50, 50)],
+        timestamp=1,
+    )
+    by_pos = {round(tv.current_position[0]): tv.track_id for tv in out1}
+    assert by_pos[25.0] == 1     # left vehicle kept ID 1
+    assert by_pos[350.0] == 2    # right vehicle kept ID 2
+
+
+def test_tracker_expires_track_after_buffer_and_issues_new_id():
+    from tracking.bytetrack import VehicleTracker
+
+    tracker = VehicleTracker(track_buffer=2, match_thresh=0.8)
+    box = (100, 100, 200, 200)
+
+    assert [tv.track_id for tv in tracker.update([_mkdet("car", 0.9, *box)], 0)] == [1]
+    assert [tv.track_id for tv in tracker.update([_mkdet("car", 0.9, *box)], 1)] == [1]
+    assert tracker.update([], 2) == []
+    assert tracker.update([], 3) == []
+    assert tracker.update([], 4) == []  # 3rd miss past buffer=2 -> removed
+    refound = tracker.update([_mkdet("car", 0.9, *box)], 5)
+    assert [tv.track_id for tv in refound] == [2]  # brand-new ID, never reused
+
+
+def test_tracker_low_score_detection_keeps_track_alive_byte_stage():
+    from tracking.bytetrack import VehicleTracker
+
+    tracker = VehicleTracker(track_buffer=10, match_thresh=0.8)
+    box = (100, 100, 200, 200)
+    out0 = tracker.update([_mkdet("car", 0.9, *box)], 0)
+    # A low-confidence box (below track_thresh=0.5) reappearing: BYTE stage 2
+    # should recover the SAME track, not spawn a second one.
+    out1 = tracker.update([_mkdet("car", 0.3, *box)], 1)
+    assert [tv.track_id for tv in out0] == [1]
+    assert [tv.track_id for tv in out1] == [1]
+    assert out1[0].confidence == 0.3
+
+
+def test_hungarian_assignment_matches_bruteforce():
+    import itertools
+
+    import numpy as np
+
+    from tracking.bytetrack import _hungarian_assignment
+
+    rng = np.random.default_rng(0)
+    for shape in [(2, 2), (3, 3), (2, 4), (4, 2)]:
+        cost = rng.random(shape)
+        rows, cols = _hungarian_assignment(cost)
+        assert len(rows) == min(shape)
+        sol = sum(cost[r, c] for r, c in zip(rows, cols))
+        # Brute force over all max-cardinality matchings:
+        #  n <= m: inject each row to a distinct column.
+        #  n >  m: inject each column to a distinct row.
+        best = float("inf")
+        if shape[0] <= shape[1]:
+            for perm in itertools.permutations(range(shape[1]), shape[0]):
+                val = sum(cost[i, perm[i]] for i in range(shape[0]))
+                best = min(best, val)
+        else:
+            for perm in itertools.permutations(range(shape[0]), shape[1]):
+                val = sum(cost[perm[j], j] for j in range(shape[1]))
+                best = min(best, val)
+        assert abs(sol - best) < 1e-9
+
+
+def test_tracker_from_config_reads_tracker_values():
+    from pathlib import Path
+
+    from tracking.bytetrack import VehicleTracker
+
+    repo_root = Path(__file__).resolve().parent.parent
+    tracker = VehicleTracker.from_config(str(repo_root / "configs" / "model.yaml"))
+    assert tracker.track_buffer == 30
+    assert tracker.match_thresh == 0.8
+    assert tracker.track_thresh == 0.5
+    assert tracker.low_match_thresh == 0.5
+
+
+def test_tracker_moving_vehicle_keeps_single_id():
+    """A vehicle translating between frames (IoU < 0.8) must not fragment.
+
+    BYTE's cost gate is 1 - IoU <= match_thresh (default 0.8 -> accepts
+    IoU >= 0.2), not a minimum-IoU gate; otherwise a vehicle that moves
+    more than ~a quarter of its box width per frame gets re-identified
+    every frame and counting would over-count.
+    """
+    from tracking.bytetrack import VehicleTracker
+
+    tracker = VehicleTracker(track_buffer=30, match_thresh=0.8)
+    ids = []
+    for t, x in enumerate([0, 10, 20, 30, 40, 50]):
+        out = tracker.update([_mkdet("car", 0.9, x, 100, x + 60, 200)], timestamp=t)
+        ids.append([tv.track_id for tv in out])
+    assert ids == [[1], [1], [1], [1], [1], [1]]
+
+
+def test_tracker_reset_restarts_ids():
+    from tracking.bytetrack import VehicleTracker
+
+    tracker = VehicleTracker(track_buffer=10, match_thresh=0.8)
+    box = (100, 100, 200, 200)
+    assert [tv.track_id for tv in tracker.update([_mkdet("car", 0.9, *box)], 0)] == [1]
+    tracker.reset()
+    assert [tv.track_id for tv in tracker.update([_mkdet("car", 0.9, *box)], 0)] == [1]

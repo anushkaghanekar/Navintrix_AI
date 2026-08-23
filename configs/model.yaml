@@ -23,7 +23,12 @@ classes:
 tracker:
   name: bytetrack
   track_buffer: 30       # frames to keep a lost track alive before dropping it
-  match_thresh: 0.8
+  match_thresh: 0.8      # BYTE cost gate: keep track/det pairs with (1 - IoU) <= this
+  track_thresh: 0.5      # detections >= this score are "high"; below go to byte pool
+  low_match_thresh: 0.5  # BYTE cost gate for the low-score (byte) recovery stage
+  kalman:
+    process_std: 0.05    # constant-velocity Kalman process noise per frame
+    measurement_std: 0.5 # box measurement noise
 # Dataset-specific class mappings used by scripts/prepare_*.py.
 # `datasets.<name>.class_mapping`: source-class name -> base class name from
 # `classes.normal`/`classes.emergency`; `null` means "drop this class during
