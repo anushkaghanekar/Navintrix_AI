@@ -20,3 +20,16 @@ tracker:
   name: bytetrack
   track_buffer: 30       # frames to keep a lost track alive before dropping it
   match_thresh: 0.8
+# Dataset-specific class mappings used by scripts/prepare_*.py.
+# `datasets.<name>.class_mapping`: source-class name -> base class name from
+# `classes.normal`/`classes.emergency`; `null` means "drop this class during
+# conversion" (e.g. UA-DETRAC's "others" is a heterogeneous remainder class
+# with no fixed semantics, so folding it into one of our classes would teach
+# the model label noise).
+datasets:
+  detrac:
+    class_mapping:
+      car: car
+      bus: bus
+      van: truck
+      others: null
