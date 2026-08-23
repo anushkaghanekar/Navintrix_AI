@@ -6,6 +6,10 @@ model:
   iou_threshold: 0.45
 
 classes:
+  # CLASS-ID CONTRACT: the model's class IDs are this full list in this
+  # exact order (classes.normal first, then classes.emergency). Detection
+  # maps YOLO class indexes through this order, and every dataset-prep
+  # script (scripts/prepare_*.py) writes label IDs to match.
   normal:
     - car
     - motorcycle

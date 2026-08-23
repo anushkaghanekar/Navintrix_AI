@@ -162,3 +162,151 @@ def test_prepare_detrac_end_to_end_yolo_layout(tmp_path):
     assert seq["dropped_boxes"] == 1
     assert summary["classes_kept_counts"] == {"car": 1, "motorcycle": 0, "bus": 1, "truck": 1}
     assert summary["classes_dropped_counts"] == {"others": 1}
+
+
+# ---------------------------------------------------------------------------
+# detection/detector.py + detection/inference.py
+# ---------------------------------------------------------------------------
+
+def test_detector_class_names_from_config_in_training_order():
+    from pathlib import Path
+
+    from detection.detector import load_class_names
+
+    repo_root = Path(__file__).resolve().parent.parent
+    names = load_class_names(str(repo_root / "configs" / "model.yaml"))
+    assert names == ["car", "motorcycle", "bus", "truck",
+                     "ambulance", "fire_truck", "police_vehicle"]
+
+
+def test_detector_result_to_detections_maps_indexes_and_filters_confidence():
+    from detection.detector import _result_to_detections
+
+    class FakeBoxes:
+        def __init__(self):
+            self.xyxy = [[0, 0, 100, 60], [5, 5, 50, 50], [10, 10, 20, 20]]
+            self.conf = [0.9, 0.7, 0.8]
+            self.cls = [0, 4, 3]
+
+    class FakeResult:
+        def __init__(self, boxes):
+            self.boxes = boxes
+
+    class_names = ["car", "motorcycle", "bus", "truck", "ambulance"]
+    detections = _result_to_detections(FakeResult(FakeBoxes()), class_names, 0.75)
+    # cls 0 -> car (conf 0.9); cls 4 -> ambulance (0.7 below 0.75, dropped);
+    # cls 3 -> truck (conf 0.8). Emitted in model order; sorting is detect()'s job.
+    assert len(detections) == 2
+    assert detections[0].cls == "car"
+    assert detections[0].confidence == 0.9
+    assert (detections[0].x1, detections[0].y1, detections[0].x2, detections[0].y2) == (
+        0.0, 0.0, 100.0, 60.0,
+    )
+    assert detections[1].cls == "truck"
+
+
+def test_detector_detect_runs_predict_and_sorts_by_confidence():
+    from detection.detector import VehicleDetector
+
+    det = VehicleDetector.__new__(VehicleDetector)
+    det.confidence_threshold = 0.5
+    det.iou_threshold = 0.45
+    det.class_names = ["car", "motorcycle", "bus", "truck", "ambulance"]
+
+    class FakeBoxes:
+        def __init__(self, xyxy, conf, cls):
+            self.xyxy = xyxy
+            self.conf = conf
+            self.cls = cls
+
+    class FakeResult:
+        def __init__(self, boxes):
+            self.boxes = boxes
+
+    class StubModel:
+        def predict(self, source, conf, iou, verbose):
+            return [
+                FakeResult(FakeBoxes([[0, 0, 10, 10], [20, 20, 40, 40]], [0.9, 0.6], [0, 4])),
+                FakeResult(FakeBoxes([[50, 50, 60, 60], [0, 0, 1, 1]], [0.95, 0.4], [3, 2])),
+            ]
+
+    det.model = StubModel()
+    dets = det.detect("whatever-the-frame-is")
+    # Merged across both predict results, 0.4 dropped below threshold, sorted desc.
+    assert [(d.cls, d.confidence) for d in dets] == [
+        ("truck", 0.95),
+        ("car", 0.9),
+        ("ambulance", 0.6),
+    ]
+
+
+def test_run_on_video_calls_callback_for_every_frame(tmp_path):
+    import cv2
+    import numpy as np
+
+    from detection.detector import Detection
+    from detection.inference import run_on_video
+
+    video = tmp_path / "sample.mp4"
+    writer = cv2.VideoWriter(str(video), cv2.VideoWriter_fourcc(*"mp4v"), 10, (64, 48))
+    try:
+        for i in range(6):
+            writer.write(np.full((48, 64, 3), i * 20, dtype=np.uint8))
+    finally:
+        writer.release()
+
+    class FakeDetector:
+        def detect(self, frame):
+            return [Detection("car", 0.9, 0, 0, 10, 10)]
+
+    seen = []
+    count = run_on_video(str(video), FakeDetector(), lambda idx, dets: seen.append((idx, len(dets))))
+    assert count == 6
+    assert [idx for idx, _ in seen] == list(range(6))
+    assert all(n == 1 for _, n in seen)
+
+
+def test_run_on_video_skips_corrupt_frames_and_honors_max_frames(tmp_path):
+    import cv2
+    import numpy as np
+
+    from detection.inference import run_on_video
+
+    video = tmp_path / "sample.mp4"
+    writer = cv2.VideoWriter(str(video), cv2.VideoWriter_fourcc(*"mp4v"), 10, (64, 48))
+    try:
+        for i in range(6):
+            writer.write(np.full((48, 64, 3), i * 20, dtype=np.uint8))
+    finally:
+        writer.release()
+
+    class FlakyDetector:
+        def __init__(self):
+            self.calls = 0
+
+        def detect(self, frame):
+            self.calls += 1
+            if self.calls % 2 == 1:  # frames 0, 2, 4 raise
+                raise RuntimeError("corrupt frame")
+            return []
+
+    seen = []
+    count = run_on_video(str(video), FlakyDetector(), lambda idx, dets: seen.append(idx))
+    # 3 good frames pass through the callback (indices 1, 3, 5); corrupt ones are skipped.
+    assert count == 3
+    assert seen == [1, 3, 5]
+
+    class CountingDetector:
+        def detect(self, frame):
+            return []
+
+    assert run_on_video(str(video), CountingDetector(), lambda idx, dets: None, max_frames=2) == 2
+
+
+def test_run_on_video_raises_for_unopenable_source(tmp_path):
+    import pytest
+
+    from detection.inference import run_on_video
+
+    with pytest.raises(IOError):
+        run_on_video(str(tmp_path / "does_not_exist.mp4"), object(), lambda *a: None)
