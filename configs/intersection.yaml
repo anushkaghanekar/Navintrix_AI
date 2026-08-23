@@ -1,0 +1,43 @@
+# Intersection / ROI configuration.
+# Fill in real pixel (or, if calibrated, real-world) coordinates per camera —
+# never hardcode these in application code. One file per intersection means
+# the same codebase can support a second intersection by adding a file here.
+
+intersection:
+  name: main_intersection
+  camera_source: "path/or/stream/url/per/approach"
+
+roads:
+  north:
+    roi: []                # polygon points bounding the approach
+    queue_roi: []           # sub-region used for queue-length estimation
+    counting_line: []       # line vehicles cross to be counted
+    allowed_movements: [straight, left, right]
+
+  south:
+    roi: []
+    queue_roi: []
+    counting_line: []
+    allowed_movements: [straight, left, right]
+
+  east:
+    roi: []
+    queue_roi: []
+    counting_line: []
+    allowed_movements: [straight, left, right]
+
+  west:
+    roi: []
+    queue_roi: []
+    counting_line: []
+    allowed_movements: [straight, left, right]
+
+# density = car_count + motorcycle_weight*motorcycle_count
+#         + bus_weight*bus_count + truck_weight*truck_count
+# These are tunable project parameters, not physical constants — justify
+# whatever values you land on in the report rather than treating them as given.
+density_weights:
+  car: 1.0
+  motorcycle: 0.5
+  bus: 2.5
+  truck: 2.5

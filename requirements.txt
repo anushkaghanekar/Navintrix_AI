@@ -1,0 +1,35 @@
+# Deep learning / CV
+torch
+torchvision
+ultralytics          # YOLO11
+opencv-python
+numpy
+
+# Tracking (ByteTrack ships inside ultralytics' tracker module;
+# use the standalone repo instead if you need more control)
+
+# Simulation
+sumolib
+traci
+
+# Backend
+fastapi
+uvicorn[standard]
+websockets
+pydantic
+python-dotenv
+
+# Config / data
+pyyaml
+pandas
+
+# Evaluation / plotting
+matplotlib
+scikit-learn
+
+# Testing
+pytest
+pytest-asyncio
+
+# Dev
+python-dotenv

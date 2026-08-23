@@ -1,0 +1,22 @@
+# Detector / tracker configuration.
+
+model:
+  weights_path: "models/best.pt"
+  confidence_threshold: 0.5
+  iou_threshold: 0.45
+
+classes:
+  normal:
+    - car
+    - motorcycle
+    - bus
+    - truck
+  emergency:
+    - ambulance
+    - fire_truck
+    - police_vehicle
+
+tracker:
+  name: bytetrack
+  track_buffer: 30       # frames to keep a lost track alive before dropping it
+  match_thresh: 0.8
