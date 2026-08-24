@@ -174,6 +174,113 @@ def test_state_machine_invalid_timers_raise():
         _build(yellow_seconds=0)
 
 
+# ---------------------------------------------------------------------------
+# controller/adaptive_controller.py + controller/fairness.py
+# ---------------------------------------------------------------------------
+
+def test_priority_score_is_weighted_sum():
+    from controller.adaptive_controller import priority_score
+
+    coeffs = {"alpha": 1.0, "beta": 2.0, "gamma": 3.0, "delta": 4.0}
+    assert priority_score(1, 2, 3, 4, coeffs) == pytest.approx(1 + 4 + 9 + 16)
+
+
+def test_fairness_forces_green_after_max_wait():
+    from controller.fairness import FairnessTracker
+
+    tracker = FairnessTracker(max_wait_seconds=90.0)
+    assert tracker.road_forcing_green(50.0) is None      # nobody starved yet
+
+    tracker.on_green_granted("north", 0.0)
+    tracker.on_green_granted("south", 0.0)
+    tracker.on_green_granted("east", 0.0)
+    # Let west wait past the 90s ceiling.
+    tracker.on_green_granted("west", 0.0)
+    forced = tracker.road_forcing_green(120.0)
+    assert forced is None  # all waited ~120s > 90, but tie -> worst offender still matters
+
+    # Make west the clear worst offender.
+    tracker.on_green_granted("north", 100.0)
+    tracker.on_green_granted("south", 100.0)
+    tracker.on_green_granted("east", 100.0)
+    # west still last granted at 0 -> waited 120s, overshoot 30s
+    assert tracker.road_forcing_green(120.0) == "west"
+
+
+def test_adaptive_requests_highest_priority_road():
+    from controller.adaptive_controller import AdaptiveController
+    from controller.state_machine import SafetyStateMachine, SignalPhase
+
+    cfg = dict(_SIGNAL_CFG)
+    sm = SafetyStateMachine(cfg)
+    controller_cfg = {"controller": {"alpha": 1.0, "beta": 1.0, "gamma": 1.0, "delta": 1.0}}
+
+    class FakeFairness:
+        def road_forcing_green(self, t):
+            return None
+
+    controller = AdaptiveController(sm, controller_cfg, FakeFairness())
+    controller.set_time(11.0)  # past min green so a request is accepted
+
+    metrics = {
+        "north": {"density": 10, "queue_length": 2, "waiting_time": 5, "flow": 1},
+        "east": {"density": 40, "queue_length": 5, "waiting_time": 20, "flow": 3},
+    }
+    # east has clearly higher weighted score -> chosen and requested.
+    assert controller.choose_next_road(metrics) == "east"
+    # Request actually reached the machine.
+    assert sm.phase is SignalPhase.YELLOW
+    assert sm.pending_road() == "east"
+
+
+def test_adaptive_fairness_override_wins_over_raw_score():
+    from controller.adaptive_controller import AdaptiveController
+    from controller.state_machine import SafetyStateMachine, SignalPhase
+    from controller.fairness import FairnessTracker
+
+    sm = SafetyStateMachine(dict(_SIGNAL_CFG))
+    fairness = FairnessTracker(max_wait_seconds=90.0)
+    controller = AdaptiveController(
+        sm, {"controller": {"alpha": 1.0, "beta": 1.0, "gamma": 1.0, "delta": 1.0}}, fairness
+    )
+    controller.set_time(120.0)
+
+    # Make west the starved road (last granted at 0); all others recent.
+    fairness.on_green_granted("west", 0.0)
+    for road in ("north", "south", "east"):
+        fairness.on_green_granted(road, 100.0)
+
+    metrics = {
+        "north": {"density": 100, "queue_length": 20, "waiting_time": 50, "flow": 5},
+        "west": {"density": 0, "queue_length": 0, "waiting_time": 0, "flow": 0},
+    }
+    # Even though north has the higher raw priority, the starved west is forced.
+    assert controller.choose_next_road(metrics) == "west"
+    assert sm.pending_road() == "west"
+
+
+def test_adaptive_empty_metrics_is_noop():
+    from controller.adaptive_controller import AdaptiveController
+
+    class FakeSM:
+        def __init__(self):
+            self.calls = []
+
+        def current_green_road(self):
+            return "north"
+
+        def request_phase_change(self, road, now):
+            self.calls.append(road)
+
+    class FakeFairness:
+        def road_forcing_green(self, t):
+            return None
+
+    controller = AdaptiveController(FakeSM(), {}, FakeFairness())
+    assert controller.choose_next_road({}) == "north"
+    assert controller.state_machine.calls == []
+
+
 def test_emergency_priority_only_triggers_when_actually_approaching():
     pytest.skip("TODO: emergency/detector.py's is_approaching_intersection")
 
