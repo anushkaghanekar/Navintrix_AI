@@ -9,23 +9,169 @@ import pytest
 
 
 def test_counting_does_not_double_count_same_track_id():
-    pytest.skip("TODO: implement once counting/counter.py exists")
+    """The core counting guarantee: one track_id = one count, even if the
+    vehicle crosses the counting line across many frames."""
+    from counting.counter import VehicleCounter
+    from tracking.bytetrack import TrackedVehicle
+
+    counter = VehicleCounter()
+    tv = TrackedVehicle(
+        track_id=1, cls="car", confidence=0.9,
+        current_position=(400, 150), previous_position=(400, 250),
+        first_seen_time=0, last_seen_time=0, road="north",
+    )
+    # Vehicle visible (and crossing) across N frames.
+    for _ in range(50):
+        counter.update(tv, crossed_counting_line=True)
+    assert counter.counts_by_road == {"north": 1, "south": 0, "east": 0, "west": 0}
+    assert counter.counts_by_class == {"car": 1}
+
+
+_SIGNAL_CFG = {
+    "min_green_seconds": 10,
+    "max_green_seconds": 60,
+    "yellow_seconds": 3,
+    "all_red_seconds": 2,
+}
+
+
+def _build(**overrides):
+    from controller.state_machine import SafetyStateMachine
+
+    cfg = dict(_SIGNAL_CFG)
+    cfg.update(overrides)
+    return SafetyStateMachine(cfg)
 
 
 def test_state_machine_never_skips_yellow_and_all_red():
-    pytest.skip("TODO: implement once controller/state_machine.py exists")
+    from controller.state_machine import SignalPhase
+
+    m = _build()
+    assert m.current_green_road() == "north"
+
+    # Request a hand-off after min green is satisfied.
+    assert m.request_phase_change("east", 11.0) is True
+    assert m.phase is SignalPhase.YELLOW
+
+    # Still yellow before the yellow window elapses.
+    m.tick(12.5)
+    assert m.phase is SignalPhase.YELLOW
+
+    # Yellow_seconds=3 from t=11 -> all-red no earlier than t=14.
+    m.tick(14.0)
+    assert m.phase is SignalPhase.ALL_RED
+    m.tick(15.0)
+    assert m.phase is SignalPhase.ALL_RED
+
+    # all_red_seconds=2 from t=14 -> green on east at t=16.
+    m.tick(16.0)
+    assert m.phase is SignalPhase.GREEN
+    assert m.current_green_road() == "east"
+    assert m.green_roads() == ["east"]
 
 
 def test_state_machine_refuses_conflicting_green():
-    pytest.skip("TODO: implement once controller/state_machine.py exists")
+    """The FSM never lets two approaches hold green simultaneously.
+
+    A request to switch from the current green to a conflicting approach
+    is only honored through the full yellow -> all-red -> green sequence,
+    so at no instant does green_roads() ever exceed one entry. Requests to
+    re-target mid-transition, or for the already-green road, are refused.
+    """
+    import random
+
+    from controller.state_machine import SignalPhase
+
+    m = _build()
+    rng = random.Random(0)
+    roads = ("north", "south", "east", "west")
+
+    # Already-green request is refused.
+    assert m.green_roads() == ["north"]
+    assert m.request_phase_change("north", 5.0) is False
+
+    # Min-green not satisfied -> a conflicting request is refused.
+    assert m.request_phase_change("west", 5.0) is False
+
+    # A hand-off request after min: accepted, but green leaves immediately
+    # (yellow), so north and west are never green at the same time.
+    assert m.request_phase_change("west", 11.0) is True
+    assert m.phase is SignalPhase.YELLOW
+    # Mid-transition re-target is refused.
+    assert m.request_phase_change("east", 12.0) is False
+    assert m.request_phase_change("south", 12.0) is False
+    # Walk the sequence and assert the one-green invariant at every tick.
+    for t in (11.5, 14.0, 15.0, 16.0, 17.0):
+        m.tick(t)
+        assert len(m.green_roads()) <= 1, f"conflicting green at t={t}"
+
+    # Long chaotic stress: random requests + emergency flips never yield
+    # two concurrent greens, and each observed green change passes through
+    # BOTH yellow and all-red.
+    m = _build()
+    t = 0.0
+    last_green_road = None
+    seen_yellow = seen_all_red = False
+    for _ in range(400):
+        t += 0.5
+        if rng.random() < 0.3:
+            road = rng.choice(roads)
+            m.request_phase_change(road, t, emergency=(rng.random() < 0.1))
+        phase = m.tick(t)
+        if phase is SignalPhase.YELLOW:
+            seen_yellow = True
+        elif phase is SignalPhase.ALL_RED:
+            seen_all_red = True
+        elif phase is SignalPhase.GREEN:
+            road = m.current_green_road()
+            if last_green_road is not None and road != last_green_road:
+                assert seen_yellow and seen_all_red, "green hand-off skipped a safety stage"
+            last_green_road = road
+            seen_yellow = seen_all_red = False
+        assert len(m.green_roads()) <= 1
 
 
 def test_state_machine_enforces_min_green():
-    pytest.skip("TODO")
+    m = _build()
+    # Before min_green (10s) is met: refused.
+    assert m.request_phase_change("south", 5.0) is False
+    assert m.request_phase_change("south", 9.5) is False
+    # Immediately after the min window, accepted.
+    assert m.request_phase_change("south", 10.0001) is True
+
+    # Emergency cuts the min wait but still starts the full sequence.
+    m2 = _build()
+    assert m2.request_phase_change("west", 1.0, emergency=True) is True
+    from controller.state_machine import SignalPhase
+
+    assert m2.phase is SignalPhase.YELLOW
 
 
 def test_state_machine_enforces_max_green():
-    pytest.skip("TODO")
+    from controller.state_machine import SignalPhase
+
+    # max_green=5 with no incoming requests must still force a rotation.
+    m = _build(min_green_seconds=2, max_green_seconds=5, yellow_seconds=1, all_red_seconds=1)
+    for t in (1.0, 3.0):
+        assert m.tick(t) is SignalPhase.GREEN  # still within max
+    m.tick(5.0)  # max reached -> forced off green even with no request
+    assert m.phase is SignalPhase.YELLOW
+    assert m.tick(6.0) is SignalPhase.ALL_RED
+    assert m.tick(7.0) is SignalPhase.GREEN
+    assert m.current_green_road() == "east"  # rotation north -> east
+
+
+def test_state_machine_invalid_timers_raise():
+    import pytest
+
+    from controller.state_machine import SafetyStateMachine
+
+    missing = dict(_SIGNAL_CFG)
+    del missing["yellow_seconds"]
+    with pytest.raises(ValueError):
+        SafetyStateMachine(missing)
+    with pytest.raises(ValueError):
+        _build(yellow_seconds=0)
 
 
 def test_emergency_priority_only_triggers_when_actually_approaching():
