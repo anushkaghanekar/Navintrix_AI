@@ -617,3 +617,86 @@ def test_movement_classify_uses_config_table():
 
     # Default table comes from configs/intersection.yaml.
     assert classify_movement("west", "east") == "straight"
+
+
+# ---------------------------------------------------------------------------
+# analytics/  (density, queue, waiting_time, traffic_flow)
+# ---------------------------------------------------------------------------
+
+def test_density_weighted_sum():
+    from analytics.density import compute_density
+
+    weights = {"car": 1.0, "motorcycle": 0.5, "bus": 2.5, "truck": 2.5}
+    assert compute_density({"car": 4, "bus": 2}, weights) == pytest.approx(9.0)
+    # A class absent from weights contributes 0 (no error).
+    assert compute_density({"car": 4, "police": 9}, weights) == pytest.approx(4.0)
+
+
+def test_queue_length_counts_stopped_inside_region():
+    from analytics.queue import estimate_queue_length
+    from tracking.bytetrack import TrackedVehicle
+
+    queue_roi = [[0, 0], [100, 0], [100, 100], [0, 100]]
+    stopped_prev = (50 + 0.2, 50 + 0.2)  # tiny drift (< 1px) -> "stopped"
+    stopped = TrackedVehicle(
+        track_id=1, cls="car", confidence=0.9,
+        current_position=(50, 50), previous_position=stopped_prev,
+        first_seen_time=0, last_seen_time=1, road="north",
+    )
+    moving = TrackedVehicle(
+        track_id=2, cls="car", confidence=0.9,
+        current_position=(50, 50), previous_position=(30, 30),
+        first_seen_time=0, last_seen_time=1, road="north",
+    )
+    outside = TrackedVehicle(
+        track_id=3, cls="car", confidence=0.9,
+        current_position=(500, 500), previous_position=(501, 501),
+        first_seen_time=0, last_seen_time=1, road="north",
+    )
+    no_prev = TrackedVehicle(
+        track_id=4, cls="car", confidence=0.9,
+        current_position=(50, 50), previous_position=None,
+        first_seen_time=0, last_seen_time=1, road="north",
+    )
+    assert estimate_queue_length([stopped, moving, outside, no_prev], queue_roi) == 1
+    assert estimate_queue_length([], queue_roi) == 0
+
+
+def test_waiting_time_accumulates_and_aggregates():
+    from analytics.waiting_time import WaitingTimeTracker
+
+    tracker = WaitingTimeTracker()
+    tracker.on_enter_queue(1, 10.0, road="north")   # enters queue at t=10
+    assert tracker.current_wait(1, 15.0) == pytest.approx(5.0)
+    assert tracker.on_depart(1, 25.0) == pytest.approx(15.0)
+    assert tracker.current_wait(1, 30.0) == 0.0        # no longer queued
+    assert tracker.road_average("north") == pytest.approx(15.0)
+    assert tracker.road_max("north") == pytest.approx(15.0)
+
+    # Repeat entry survives; depart is idempotent.
+    tracker.on_enter_queue(2, 40.0, road="south")
+    tracker.on_enter_queue(2, 41.0, road="south")       # already queued, ignored
+    assert tracker.on_depart(2, 50.0) == pytest.approx(10.0)
+    assert tracker.on_depart(2, 60.0) == 0.0            # already departed
+
+    # Never queued -> 0.
+    assert tracker.on_depart(999, 60.0) == 0.0
+
+
+def test_traffic_flow_window_and_rate():
+    from analytics.traffic_flow import FlowTracker
+
+    tracker = FlowTracker(window_seconds=60.0)
+    # Crossings at t=5, 55, 58 (all within 60s of each other as of t=58).
+    for t in (5.0, 55.0, 58.0):
+        tracker.on_crossing("north", t)
+    assert tracker.current_flow("north", now=58.0) == pytest.approx(3.0)
+
+    # Querying later slides the window: the t=5 crossing drops out by t=110.
+    assert tracker.current_flow("north", now=110.0) == pytest.approx(2.0)
+
+    # By t=130 the earliest survivor (t=55) has also aged out.
+    assert tracker.current_flow("north", now=130.0) == pytest.approx(0.0)
+
+    # Unknown road just has zero flow.
+    assert tracker.current_flow("bogus") == 0.0
