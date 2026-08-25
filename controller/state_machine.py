@@ -111,6 +111,12 @@ class SafetyStateMachine:
         """The road locked in to receive green after the current transition."""
         return self._pending_road
 
+    def outgoing_road(self) -> str | None:
+        """The approach now exiting green, or the current green road during
+        GREEN. During YELLOW/ALL_RED this is the road that held green before
+        the transition — used to pick which SUMO transition phase to show."""
+        return self._current_road
+
     # -- REQUEST API --
 
     def request_phase_change(

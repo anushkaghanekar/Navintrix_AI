@@ -1122,3 +1122,409 @@ def test_traffic_flow_window_and_rate():
 
     # Unknown road just has zero flow.
     assert tracker.current_flow("bogus") == 0.0
+
+
+# ---------------------------------------------------------------------------
+# simulation/sumo.py + simulation/traci_controller.py
+# ---------------------------------------------------------------------------
+
+def _sim_cfg_dict():
+    """A valid ``simulation`` block (mirrors configs/signal.yaml's indices)."""
+    return {
+        "traffic_light_id": "tl_1",
+        "phase_index_green": {"north": 0, "south": 0, "east": 2, "west": 2},
+        "phase_index_yellow": {"north": 1, "south": 1, "east": 3, "west": 3},
+        "phase_index_all_red": 4,
+        "edge_to_road": {"N0": "north", "S0": "south", "E0": "east", "W0": "west"},
+    }
+
+
+def test_sim_config_validation_requires_core_keys():
+    from simulation.traci_controller import validate_simulation_config
+
+    with pytest.raises(ValueError, match="required key"):
+        validate_simulation_config({})
+    cfg = _sim_cfg_dict()
+    del cfg["phase_index_green"]["west"]
+    with pytest.raises(ValueError, match="west"):
+        validate_simulation_config(cfg)
+    cfg = _sim_cfg_dict()
+    cfg["edge_to_road"] = {}
+    with pytest.raises(ValueError, match="edge_to_road"):
+        validate_simulation_config(cfg)
+
+
+def test_sim_config_validation_checks_optional_keys():
+    from simulation.traci_controller import validate_simulation_config
+
+    cfg = _sim_cfg_dict()
+    cfg["intersection_center_m"] = [0.0, 0.0, 0.0]
+    with pytest.raises(ValueError, match="intersection_center_m"):
+        validate_simulation_config(cfg)
+    cfg = _sim_cfg_dict()
+    cfg["vehicle_class_mapping"] = {"passenger": 3}
+    with pytest.raises(ValueError, match="vehicle_class_mapping"):
+        validate_simulation_config(cfg)
+    cfg = _sim_cfg_dict()
+    cfg["intersection_center_m"] = None
+    cfg["vehicle_class_mapping"] = {"passenger": "car"}
+    validate_simulation_config(cfg)  # a fully valid block passes silently
+
+
+def test_load_simulation_config_reads_repo_yaml():
+    from pathlib import Path
+
+    from simulation.traci_controller import load_simulation_config
+
+    repo_root = Path(__file__).resolve().parent.parent
+    sim = load_simulation_config(str(repo_root / "configs" / "signal.yaml"))
+    assert sim["traffic_light_id"] == "tl_1"
+    assert set(sim["edge_to_road"].values()) == {"north", "south", "east", "west"}
+    assert set(sim["vehicle_class_mapping"].values()) <= {
+        "car", "motorcycle", "bus", "truck",
+        "ambulance", "fire_truck", "police_vehicle",
+    }
+
+
+def test_sumo_scenario_loader_validates_names(tmp_path, monkeypatch):
+    import simulation.sumo as sumo_mod
+
+    monkeypatch.setattr(sumo_mod, "SCENARIO_DIR", tmp_path)
+    assert sumo_mod.available_scenarios() == []
+    with pytest.raises(FileNotFoundError):
+        sumo_mod.load_scenario_config("balanced")
+    (tmp_path / "balanced.sumocfg").write_text("<configuration/>")
+    assert sumo_mod.available_scenarios() == ["balanced"]
+    assert sumo_mod.load_scenario_config("balanced").endswith("balanced.sumocfg")
+    with pytest.raises(ValueError):
+        sumo_mod.load_scenario_config("../outside")
+
+
+def test_road_assignment_from_edge_ids():
+    from simulation.traci_controller import SimVehicle, assign_roads, road_for_vehicle
+
+    def veh(edge):
+        return SimVehicle(
+            vehicle_id="v", cls="car", edge_id=edge,
+            position=(0.0, 0.0), speed=0.0, waiting_time=0.0,
+        )
+
+    mapping = {"N0": "north", "E0": "east"}
+    assert road_for_vehicle(veh("N0"), mapping) == "north"
+    assert road_for_vehicle(veh(":tl_1_0"), mapping) is None  # internal edge
+    vehicles = [veh("N0"), veh("E0"), veh(":tl_1_0")]
+    assign_roads(vehicles, mapping)
+    assert [v.road for v in vehicles] == ["north", "east", None]
+
+
+def test_build_road_metrics_aggregates_one_snapshot():
+    from simulation.traci_controller import SimVehicle, build_road_metrics
+
+    def veh(cls, edge, speed, wait, road=None):
+        return SimVehicle(
+            vehicle_id=cls + edge, cls=cls, edge_id=edge,
+            position=(0.0, 0.0), speed=speed, waiting_time=wait, road=road,
+        )
+
+    vehicles = [
+        veh("car", "N0", 0.0, 7.0),        # stopped on north
+        veh("bus", "S0", 5.0, 0.0),        # moving on south
+        veh("truck", "E0", 0.05, 3.0),     # below threshold -> queued
+        veh("motorcycle", "X1", 0.0, 9.0), # unmapped edge -> ignored
+        veh("ambulance", "W0", 8.0, 0.0),  # class without a weight -> 1.0
+    ]
+    weights = {"car": 1.0, "bus": 2.5, "truck": 2.5}
+    metrics = build_road_metrics(vehicles, _sim_cfg_dict()["edge_to_road"], weights)
+    assert set(metrics) == {"north", "south", "east", "west"}
+    assert metrics["north"] == {"density": 1.0, "queue_length": 1, "waiting_time": 7.0, "flow": 0.0}
+    assert metrics["south"]["density"] == pytest.approx(2.5)
+    assert metrics["south"]["queue_length"] == 0
+    assert metrics["east"] == {"density": 2.5, "queue_length": 1, "waiting_time": 3.0, "flow": 0.0}
+    assert metrics["west"]["density"] == pytest.approx(1.0)
+
+
+def test_signal_state_mapping_uses_outgoing_road_for_yellow():
+    from simulation.traci_controller import signal_state_for_fsm
+
+    sim_cfg = _sim_cfg_dict()
+    m = _build()
+    assert m.phase.name == "GREEN"
+    assert signal_state_for_fsm(m, sim_cfg) == 0            # green[north]
+
+    assert m.request_phase_change("west", 11.0, emergency=True) is True
+    assert m.phase.name == "YELLOW"
+    # Yellow displays the EXITING road's transition phase (north -> 1);
+    # the incoming road's yellow index (west -> 3) must not be used yet.
+    assert signal_state_for_fsm(m, sim_cfg) == 1
+
+    m.tick(14.0)
+    assert m.phase.name == "ALL_RED"
+    assert signal_state_for_fsm(m, sim_cfg) == 4
+
+    m.tick(16.0)
+    assert m.phase.name == "GREEN"
+    assert signal_state_for_fsm(m, sim_cfg) == 2            # green[west]
+
+
+def test_snapshot_vehicles_maps_vclasses_and_drops_unknown():
+    from types import SimpleNamespace
+
+    from simulation.traci_controller import snapshot_vehicles
+
+    rows = {
+        "v1": ("passenger", "N0", (1.0, 2.0), 0.0, 4.0),
+        "v2": ("bicycle", "N0", (3.0, 4.0), 1.0, 0.0),
+        "v3": ("emergency", "W0", (-5.0, 5.0), 6.0, 0.0),
+    }
+    api = SimpleNamespace(
+        getIDList=lambda: ["v1", "v2", "v3"],
+        getVehicleClass=lambda vid: rows[vid][0],
+        getRoadID=lambda vid: rows[vid][1],
+        getPosition=lambda vid: rows[vid][2],
+        getSpeed=lambda vid: rows[vid][3],
+        getWaitingTime=lambda vid: rows[vid][4],
+    )
+    vehicles = snapshot_vehicles(
+        SimpleNamespace(vehicle=api),
+        {"passenger": "car", "emergency": "ambulance"},
+    )
+    assert [v.vehicle_id for v in vehicles] == ["v1", "v3"]  # bicycle dropped
+    assert vehicles[0].cls == "car"
+    assert vehicles[0].position == (1.0, 2.0)
+    assert vehicles[1].cls == "ambulance"
+    assert vehicles[1].speed == 6.0
+    assert vehicles[1].waiting_time == 0.0
+
+
+def test_sim_emergency_states_verify_approach_in_meter_space():
+    from simulation.traci_controller import SimVehicle, build_emergency_states
+
+    center = (0.0, 0.0)
+    id_registry, counters = {}, {}
+
+    def veh(vid, pos):
+        return SimVehicle(
+            vehicle_id=vid, cls="ambulance", edge_id="W0",
+            position=pos, speed=5.0, waiting_time=0.0, road="west",
+        )
+
+    # First sight: no previous position -> conservatively "not approaching".
+    states = build_emergency_states(
+        [veh("a", (-40.0, 5.0))], {}, center, {"ambulance"}, 3, id_registry, counters,
+    )
+    assert states[0].approaching_intersection is False
+    assert states[0].cleared is False
+
+    # Moving toward the center -> approaching, stable int id assigned.
+    states = build_emergency_states(
+        [veh("a", (-35.0, 5.0))], {"a": (-40.0, 5.0)}, center,
+        {"ambulance"}, 3, id_registry, counters,
+    )
+    assert states[0].approaching_intersection is True
+    assert states[0].track_id == 1
+    assert states[0].distance_to_intersection == pytest.approx((35.0 ** 2 + 5.0 ** 2) ** 0.5)
+
+    # Moving away three consecutive snapshots -> cleared.
+    for _ in range(3):
+        states = build_emergency_states(
+            [veh("a", (-50.0, 5.0))], {"a": (-45.0, 5.0)}, center,
+            {"ambulance"}, 3, id_registry, counters,
+        )
+    assert counters["a"] == 3
+    assert states[0].cleared is True
+
+    # Non-emergency classes never surface as emergencies.
+    car = SimVehicle(
+        vehicle_id="c", cls="car", edge_id="N0",
+        position=(0.0, -10.0), speed=1.0, waiting_time=0.0, road="north",
+    )
+    assert build_emergency_states([car], {}, center, {"ambulance"}, 3, {}, {}) == []
+
+
+class _FakeTraCI:
+    """Scripted stand-in for the traci module (lets us test the full loop
+    without SUMO installed).
+
+    Each step is a list of vehicle tuples:
+        (id, vclass, edge, (x, y), speed_mps, waiting_seconds)
+    Clock advances 1 simulated second per step; every applied signal phase
+    is recorded as (time, tls_id, program_index).
+    """
+
+    def __init__(self, steps, invariant_check=None):
+        from types import SimpleNamespace
+
+        self.steps = steps
+        self._invariant = invariant_check
+        self._t = 0.0
+        self._i = -1
+        self.current = []
+        self.started = None
+        self.closed = False
+        self.applied = []
+
+        self.simulation = SimpleNamespace(
+            getTime=lambda: self._t,
+        )
+        # Real traci exposes simulationStep() at module level.
+        self.simulationStep = self._advance
+        self.vehicle = SimpleNamespace(
+            getIDList=lambda: [v[0] for v in self.current],
+            getVehicleClass=lambda vid: self._find(vid)[1],
+            getRoadID=lambda vid: self._find(vid)[2],
+            getPosition=lambda vid: self._find(vid)[3],
+            getSpeed=lambda vid: self._find(vid)[4],
+            getWaitingTime=lambda vid: self._find(vid)[5],
+        )
+        self.trafficlight = SimpleNamespace(setPhase=self._apply_phase)
+
+    def _find(self, vid):
+        for v in self.current:
+            if v[0] == vid:
+                return v
+        raise KeyError(vid)
+
+    def _advance(self):
+        self._i += 1
+        self._t += 1.0
+        self.current = list(self.steps[self._i])
+
+    def _apply_phase(self, tls_id, index):
+        if self._invariant is not None:
+            self._invariant(index)
+        self.applied.append((self._t, tls_id, index))
+
+    def start(self, command):
+        self.started = command
+
+    def close(self):
+        self.closed = True
+
+
+def _write_sim_config_with_center(tmp_path):
+    """Repo signal config with the intersection center measured (meters)."""
+    import yaml
+
+    from pathlib import Path
+
+    repo_root = Path(__file__).resolve().parent.parent
+    cfg = yaml.safe_load((repo_root / "configs" / "signal.yaml").read_text())
+    cfg["simulation"]["intersection_center_m"] = [0.0, 0.0]
+    path = tmp_path / "signal_test.yaml"
+    path.write_text(yaml.safe_dump(cfg))
+    return str(path)
+
+
+def _scripted_steps():
+    """22 one-second steps:
+    - car_n queues on the north approach (t=1..12), departs onto E1 at t=13;
+    - car_s sits queued on south the whole time;
+    - an ambulance drives in on west (t=5..14), straight at the center.
+    """
+    steps = []
+    for t in range(1, 23):
+        vehs = []
+        if t <= 12:
+            vehs.append(("car_n", "passenger", "N0", (2.0, -30.0), 0.0, float(t)))
+        else:
+            vehs.append(("car_n", "passenger", "E1", (60.0, -30.0), 8.0, 0.0))
+        vehs.append(("car_s", "passenger", "S0", (0.0, 30.0), 0.0, float(t)))
+        if 5 <= t <= 14:
+            vehs.append(("amb1", "emergency", "W0",
+                         (-40.0 + 5.0 * (t - 5), 5.0), 5.0, 0.0))
+        steps.append(vehs)
+    return steps
+
+
+def test_run_simulation_drives_safety_fsm_through_sumo(tmp_path, monkeypatch):
+    import sys
+    from pathlib import Path
+
+    from controller.adaptive_controller import AdaptiveController
+    from controller.emergency_controller import EmergencyController
+    from controller.fairness import FairnessTracker
+    from controller.state_machine import SafetyStateMachine
+    from emergency.priority import select_priority_emergency
+    from emergency.trajectory import required_movement
+    from simulation.traci_controller import run_simulation
+
+    repo_root = Path(__file__).resolve().parent.parent
+    config_path = _write_sim_config_with_center(tmp_path)
+    intersection_cfg = str(repo_root / "configs" / "intersection.yaml")
+
+    sm = SafetyStateMachine(dict(_SIGNAL_CFG))
+    adaptive = AdaptiveController(
+        sm,
+        {"controller": {"alpha": 1.0, "beta": 1.0, "gamma": 1.0, "delta": 1.0}},
+        FairnessTracker(max_wait_seconds=90.0),
+    )
+
+    class PriorityShim:
+        def select_priority_emergency(self, emergencies, phase):
+            return select_priority_emergency(emergencies, phase)
+
+    class TrajectoryShim:
+        def required_movement(self, state, history):
+            return required_movement(state, history)
+
+    emergency = EmergencyController(sm, PriorityShim(), TrajectoryShim())
+
+    def no_conflicting_green(index):
+        # Invoked on every signal application: the FSM holds at most one
+        # green, and the index applied to SUMO is exactly the one mapped
+        # from the FSM's current state (directional authority check — the
+        # SUMO program itself may pair north+south into one phase).
+        assert len(sm.green_roads()) <= 1
+
+    fake = _FakeTraCI(_scripted_steps(), invariant_check=no_conflicting_green)
+    monkeypatch.setitem(sys.modules, "traci", fake)
+
+    metrics = run_simulation(
+        "scenarios/balanced.sumocfg", sm, adaptive, emergency, max_steps=22,
+        config_path=config_path, intersection_config_path=intersection_cfg,
+    )
+
+    assert fake.started[:2] == ["sumo", "-c"]
+    assert fake.closed is True
+    assert metrics["steps"] == 22
+    assert metrics["sim_seconds"] == pytest.approx(22.0)
+
+    # Display audit: green(north) -> yellow(north) -> all-red -> green(west)
+    # -> ... -> yellow(west). The ambulance's emergency request lands at t=6,
+    # BEFORE min_green (10s) elapses — proof that emergency cuts the min-green
+    # floor — but the yellow/all-red stages are still fully observed.
+    seq = []
+    for idx in metrics["applied_phase_sequence"]:
+        if not seq or seq[-1] != idx:
+            seq.append(idx)
+    assert seq == [0, 1, 4, 2, 3]
+    first_yellow_t = next(t for t, _, idx in fake.applied if idx == 1)
+    assert first_yellow_t == pytest.approx(6.0)
+    assert first_yellow_t < _SIGNAL_CFG["min_green_seconds"]
+
+    # Active from first verified approach (t=6) until the ambulance reaches
+    # the center (t=12); once past it, displacement is no longer toward the
+    # intersection, so approach verification conservatively drops it.
+    assert metrics["emergency_active_steps"] == 7
+    # Both departures counted once each (the emergency vehicle counts too,
+    # same as the video pipeline's class-agnostic line-crossing count).
+    assert metrics["throughput_by_road"] == {
+        "north": 1, "south": 0, "east": 0, "west": 1,
+    }
+    assert metrics["throughput_total"] == 2
+    assert metrics["waiting_avg_by_road"]["north"] == pytest.approx(12.0)
+    assert metrics["waiting_max_by_road"]["north"] == pytest.approx(12.0)
+    assert metrics["waiting_avg_by_road"]["south"] == 0.0  # never departed
+    assert metrics["avg_queue_length_by_road"]["south"] == pytest.approx(1.0)
+    assert metrics["final_flow_by_road"]["north"] == pytest.approx(1.0)
+    assert metrics["final_flow_by_road"]["west"] == pytest.approx(1.0)
+
+
+def test_run_simulation_reports_missing_traci_clearly(monkeypatch):
+    import sys
+
+    from simulation.traci_controller import run_simulation
+
+    monkeypatch.setitem(sys.modules, "traci", None)
+    with pytest.raises(RuntimeError, match="SUMO"):
+        run_simulation("x.sumocfg", None, None, None, 1)

@@ -23,3 +23,49 @@ emergency:
   # values here should never let anything skip yellow/all-red.
   min_distance_to_confirm_approach_m: null   # fill in once camera calibration exists
   clearance_confirmation_frames: 15          # frames of "gone" before declaring EMERGENCY_PASSED
+
+simulation:
+  # Bridge between SafetyStateMachine phases and the SUMO traffic-light
+  # signal program built in simulation/scenarios/ (netedit). The phase
+  # indices below are 0-based indices into that program's <phase state="...">
+  # list — they MUST match whatever netedit generated for the four-way
+  # intersection. North+south share one green phase, east+west share another.
+  traffic_light_id: "tl_1"
+  phase_index_green:
+    north: 0
+    south: 0
+    east: 2
+    west: 2
+  phase_index_yellow:
+    north: 1
+    south: 1
+    east: 3
+    west: 3
+  phase_index_all_red: 4
+  # TraCI edge IDs -> our approach name. netedit names edges; map each
+  # incoming edge of the intersection to north/south/east/west here.
+  edge_to_road:
+    N0: north
+    S0: south
+    E0: east
+    W0: west
+  # SUMO vClass -> our model's class name (must match configs/model.yaml).
+  # A vehicle whose vClass is absent here is excluded from all metrics —
+  # mirroring how the vision pipeline drops unknown classes.
+  vehicle_class_mapping:
+    passenger: car
+    motorcycle: motorcycle
+    bus: bus
+    truck: truck
+    delivery: truck
+    emergency: ambulance
+  # Below this speed (m/s) a vehicle counts as stopped/queued. Default
+  # matches SUMO's own waiting-time speed threshold.
+  stopped_speed_threshold_mps: 0.1
+  flow_window_seconds: 60
+  # Intersection center in NETWORK METERS as [x, y] — copy the junction
+  # coordinates out of the .net.xml that netedit/netconvert produces. While
+  # this is null, approach verification cannot run, so emergency priority
+  # stays OFF in simulation (conservative default, same policy as
+  # emergency.min_distance_to_confirm_approach_m above).
+  intersection_center_m: null
