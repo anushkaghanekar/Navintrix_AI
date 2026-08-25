@@ -639,6 +639,54 @@ def test_prepare_detrac_end_to_end_yolo_layout(tmp_path):
     assert summary["classes_dropped_counts"] == {"others": 1}
 
 
+def test_prepare_aicity_preserves_camera_and_annotation_relationships(tmp_path):
+    """AI City prep should preserve camera/video/ROI/movement relationships."""
+    import json
+
+    from PIL import Image
+
+    from scripts.prepare_aicity import main
+
+    raw = tmp_path / "raw"
+    cam = raw / "S01" / "c001"
+    frames = cam / "frames"
+    gt = cam / "gt"
+    frames.mkdir(parents=True)
+    gt.mkdir()
+
+    Image.new("RGB", (64, 48), color=(10, 20, 30)).save(frames / "img000001.jpg")
+    (cam / "vdo.avi").write_bytes(b"fake-video")
+    (cam / "roi.json").write_text('{"roads": []}', encoding="utf-8")
+    (cam / "movement_labels.csv").write_text("track_id,movement\n1,left\n", encoding="utf-8")
+    (gt / "gt.txt").write_text("1,1,10,10,20,20\n", encoding="utf-8")
+    (raw / "global_notes.txt").write_text("unmatched on purpose", encoding="utf-8")
+
+    out = tmp_path / "out"
+    main(["--raw-dir", str(raw), "--out-dir", str(out)])
+
+    unit_dir = out / "sequences" / "S01__c001"
+    assert (unit_dir / "media" / "vdo.avi").is_file()
+    assert (unit_dir / "media" / "frames" / "img000001.jpg").is_file()
+    assert (unit_dir / "annotations" / "roi.json").is_file()
+    assert (unit_dir / "annotations" / "movement_labels.csv").is_file()
+    assert (unit_dir / "annotations" / "gt" / "gt.txt").is_file()
+
+    manifest = json.loads((unit_dir / "metadata.json").read_text())
+    assert manifest["relative_root"] == "S01/c001"
+    assert manifest["media"] == ["frames/img000001.jpg", "vdo.avi"]
+    assert manifest["roi_files"] == ["roi.json"]
+    assert manifest["movement_files"] == ["movement_labels.csv"]
+    assert manifest["annotations"] == ["gt/gt.txt"]
+
+    summary = json.loads((out / "prep_summary.json").read_text())
+    assert summary["unit_count"] == 1
+    assert summary["media_files"] == 2
+    assert summary["roi_files"] == 1
+    assert summary["movement_files"] == 1
+    assert summary["annotation_files"] == 1
+    assert summary["unmatched_annotations"] == ["global_notes.txt"]
+
+
 # ---------------------------------------------------------------------------
 # detection/detector.py + detection/inference.py
 # ---------------------------------------------------------------------------
