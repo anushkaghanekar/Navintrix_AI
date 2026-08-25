@@ -15,6 +15,15 @@ controller:
   beta: 1.0
   gamma: 1.0
   delta: 1.0
+  baselines:
+    # Experiment 1's density-only baseline uses the same controller code path
+    # but removes queue/wait/flow influence. Keeping these coefficients here
+    # makes the baseline definition reportable and reviewable.
+    density_only:
+      alpha: 1.0
+      beta: 0.0
+      gamma: 0.0
+      delta: 0.0
   fairness:
     max_wait_before_forced_green_seconds: 90   # anti-starvation ceiling
 

@@ -1643,6 +1643,7 @@ def test_evaluation_plots_generates_image_files(tmp_path):
 
 
 def test_experiments_runners_with_fake_traci(tmp_path, monkeypatch):
+    import json
     import sys
     from evaluation.experiments import run_experiment_1, run_experiment_4
 
@@ -1655,15 +1656,26 @@ def test_experiments_runners_with_fake_traci(tmp_path, monkeypatch):
     scen_file.write_text("<configuration/>")
 
     res1 = run_experiment_1(
-        [str(scen_file)], max_steps=10, config_path=config_path
+        [str(scen_file)], max_steps=10, config_path=config_path,
+        output_dir=str(tmp_path / "results"),
     )
     assert ("fixed_time", "balanced") in res1
     assert ("density_only", "balanced") in res1
     assert ("proposed", "balanced") in res1
+    assert res1[("proposed", "balanced")]["throughput_rate_total"] >= 0.0
+    exp1_records = json.loads((tmp_path / "results" / "experiment_1_results.json").read_text())
+    assert {row["controller"] for row in exp1_records} == {
+        "fixed_time", "density_only", "proposed",
+    }
+    assert all(row["scenario"] == "balanced" for row in exp1_records)
 
     res4 = run_experiment_4(
-        [str(scen_file)], max_steps=10, config_path=config_path
+        [str(scen_file)], max_steps=10, config_path=config_path,
+        output_dir=str(tmp_path / "results"),
     )
     assert ("emergency_priority_on", "balanced") in res4
     assert ("emergency_priority_off", "balanced") in res4
-
+    exp4_records = json.loads((tmp_path / "results" / "experiment_4_results.json").read_text())
+    assert {row["controller"] for row in exp4_records} == {
+        "emergency_priority_on", "emergency_priority_off",
+    }
