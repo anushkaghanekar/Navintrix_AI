@@ -1396,6 +1396,11 @@ class _FakeTraCI:
 
     def start(self, command):
         self.started = command
+        self._t = 0.0
+        self._i = -1
+        self.current = []
+        self.closed = False
+        self.applied = []
 
     def close(self):
         self.closed = True
@@ -1528,3 +1533,84 @@ def test_run_simulation_reports_missing_traci_clearly(monkeypatch):
     monkeypatch.setitem(sys.modules, "traci", None)
     with pytest.raises(RuntimeError, match="SUMO"):
         run_simulation("x.sumocfg", None, None, None, 1)
+
+
+# ---------------------------------------------------------------------------
+# evaluation/ (metrics.py, experiments.py, plots.py)
+# ---------------------------------------------------------------------------
+
+def test_evaluation_metrics_calculations():
+    from evaluation.metrics import (
+        average_waiting_time,
+        max_waiting_time,
+        throughput,
+        emergency_response_time,
+        emergency_clearance_time,
+    )
+
+    # Waiting time
+    assert average_waiting_time([]) == 0.0
+    assert average_waiting_time([10.0, 20.0, 30.0]) == pytest.approx(20.0)
+    assert max_waiting_time([]) == 0.0
+    assert max_waiting_time([10.0, 45.0, 30.0]) == pytest.approx(45.0)
+
+    # Throughput
+    assert throughput(10, 0) == 0.0
+    assert throughput(10, -5) == 0.0
+    assert throughput(30, 60.0) == pytest.approx(0.5)
+
+    # Emergency times
+    assert emergency_response_time(10.0, 15.0) == pytest.approx(5.0)
+    assert emergency_response_time(20.0, 15.0) == 0.0  # clamped to >= 0
+    assert emergency_clearance_time(15.0, 27.0) == pytest.approx(12.0)
+    assert emergency_clearance_time(30.0, 25.0) == 0.0
+
+
+def test_evaluation_plots_generates_image_files(tmp_path):
+    from evaluation.plots import plot_waiting_time_comparison, plot_emergency_response
+
+    sample_results_exp1 = {
+        ("fixed_time", "balanced"): {"waiting_avg_by_road": {"north": 15.0, "south": 10.0}},
+        ("density_only", "balanced"): {"waiting_avg_by_road": {"north": 12.0, "south": 8.0}},
+        ("proposed", "balanced"): {"waiting_avg_by_road": {"north": 9.0, "south": 6.0}},
+    }
+    out_exp1 = tmp_path / "exp1.png"
+    plot_waiting_time_comparison(sample_results_exp1, str(out_exp1))
+    assert out_exp1.is_file()
+    assert out_exp1.stat().st_size > 0
+
+    sample_results_exp4 = {
+        ("emergency_priority_off", "emergency"): {"emergency_active_steps": 25},
+        ("emergency_priority_on", "emergency"): {"emergency_active_steps": 8},
+    }
+    out_exp4 = tmp_path / "exp4.png"
+    plot_emergency_response(sample_results_exp4, str(out_exp4))
+    assert out_exp4.is_file()
+    assert out_exp4.stat().st_size > 0
+
+
+def test_experiments_runners_with_fake_traci(tmp_path, monkeypatch):
+    import sys
+    from evaluation.experiments import run_experiment_1, run_experiment_4
+
+    config_path = _write_sim_config_with_center(tmp_path)
+    fake = _FakeTraCI(_scripted_steps())
+    monkeypatch.setitem(sys.modules, "traci", fake)
+
+    # Mock scenario path
+    scen_file = tmp_path / "balanced.sumocfg"
+    scen_file.write_text("<configuration/>")
+
+    res1 = run_experiment_1(
+        [str(scen_file)], max_steps=10, config_path=config_path
+    )
+    assert ("fixed_time", "balanced") in res1
+    assert ("density_only", "balanced") in res1
+    assert ("proposed", "balanced") in res1
+
+    res4 = run_experiment_4(
+        [str(scen_file)], max_steps=10, config_path=config_path
+    )
+    assert ("emergency_priority_on", "balanced") in res4
+    assert ("emergency_priority_off", "balanced") in res4
+
