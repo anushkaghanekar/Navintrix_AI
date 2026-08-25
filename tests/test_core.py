@@ -462,8 +462,61 @@ def test_emergency_priority_still_goes_through_safety_transition():
     assert sm.pending_road() is None
 
 
-def test_dataset_split_has_no_video_leakage_across_train_test():
-    pytest.skip("TODO: scripts/split_dataset.py")
+def test_dataset_split_has_no_video_leakage_across_train_test(tmp_path):
+    """Verify that split_dataset groups frames by sequence prefix and never
+    leaks any sequence across train/val/test splits.
+    """
+    from PIL import Image
+    from scripts.split_dataset import split_dataset
+    from scripts.validate_dataset import validate_dataset
+
+    raw_dir = tmp_path / "raw_dataset"
+    raw_dir.mkdir(parents=True)
+
+    # Create 5 sequences, each with 4 frames
+    seq_names = [f"SEQ_{i:02d}" for i in range(1, 6)]
+    for seq in seq_names:
+        for f in range(1, 5):
+            img_file = raw_dir / f"{seq}_frame_{f:04d}.jpg"
+            Image.new("RGB", (64, 64), color=(100, 100, 100)).save(img_file)
+            lbl_file = raw_dir / f"{seq}_frame_{f:04d}.txt"
+            lbl_file.write_text("0 0.5 0.5 0.2 0.2\n")
+
+    out_dir = tmp_path / "split_dataset"
+    splits = split_dataset(
+        data_dir=raw_dir,
+        out_dir=out_dir,
+        train_frac=0.6,
+        val_frac=0.2,
+        seed=123,
+        class_names=["car"],
+    )
+
+    train_seqs = set(splits["train"])
+    val_seqs = set(splits["val"])
+    test_seqs = set(splits["test"])
+
+    # All sequences accounted for
+    assert train_seqs | val_seqs | test_seqs == set(seq_names)
+
+    # Strict zero-leakage guarantee
+    assert train_seqs.isdisjoint(val_seqs)
+    assert train_seqs.isdisjoint(test_seqs)
+    assert val_seqs.isdisjoint(test_seqs)
+
+    # Check generated files
+    assert (out_dir / "data.yaml").is_file()
+    assert (out_dir / "images" / "train").is_dir()
+    assert len(list((out_dir / "images" / "train").glob("*.jpg"))) == len(train_seqs) * 4
+
+    # Validate the split dataset
+    val_summary = validate_dataset(out_dir, sample_visual_checks=2)
+    assert val_summary["valid_images"] == 20
+    assert val_summary["corrupt_images"] == 0
+    assert val_summary["missing_labels"] == 0
+    assert val_summary["total_boxes"] == 20
+    assert val_summary["invalid_boxes"] == 0
+
 
 
 # ---------------------------------------------------------------------------
