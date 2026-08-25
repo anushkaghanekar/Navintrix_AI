@@ -1679,3 +1679,94 @@ def test_experiments_runners_with_fake_traci(tmp_path, monkeypatch):
     assert {row["controller"] for row in exp4_records} == {
         "emergency_priority_on", "emergency_priority_off",
     }
+
+
+# ---------------------------------------------------------------------------
+# backend/main.py
+# ---------------------------------------------------------------------------
+
+def test_backend_endpoints_expose_config_and_fsm_state():
+    from fastapi.testclient import TestClient
+
+    import backend.main as backend_mod
+
+    backend_mod._RUNTIME.reset()
+    client = TestClient(backend_mod.app)
+
+    intersection = client.get("/api/intersection")
+    assert intersection.status_code == 200
+    body = intersection.json()
+    assert body["intersection"]["name"] == "main_intersection"
+    assert set(body["roads"]) == {"north", "south", "east", "west"}
+
+    signals = client.get("/api/signals")
+    assert signals.status_code == 200
+    assert signals.json()["phase"] == "GREEN"
+    assert signals.json()["current_green_road"] == "north"
+    assert signals.json()["signals_by_road"]["north"] == "GREEN"
+    assert signals.json()["remaining_phase_seconds"] == pytest.approx(60.0)
+
+    metrics = client.get("/api/metrics")
+    assert metrics.status_code == 200
+    assert set(metrics.json()) == {"north", "south", "east", "west"}
+    assert metrics.json()["north"]["density"] == 0.0
+
+    mode = client.post("/api/controller/mode", params={"mode": "density_only"})
+    assert mode.status_code == 200
+    assert mode.json()["mode"] == "DENSITY_ONLY"
+    assert client.post("/api/controller/mode", params={"mode": "bogus"}).status_code == 400
+
+
+def test_backend_start_runs_simulation_background_task(tmp_path, monkeypatch):
+    from fastapi.testclient import TestClient
+
+    import backend.main as backend_mod
+
+    backend_mod._RUNTIME.reset()
+    scen_file = tmp_path / "balanced.sumocfg"
+    scen_file.write_text("<configuration/>")
+
+    def fake_run_simulation(
+        sumocfg_path,
+        state_machine,
+        adaptive_controller,
+        emergency_controller,
+        max_steps,
+        **kwargs,
+    ):
+        assert sumocfg_path == str(scen_file)
+        assert max_steps == 3
+        assert state_machine.request_phase_change("east", 11.0, emergency=True) is True
+        return {
+            "scenario": "balanced",
+            "steps": 3,
+            "sim_seconds": 3.0,
+            "throughput_by_road": {"north": 1, "south": 0, "east": 0, "west": 0},
+            "throughput_total": 1,
+            "waiting_avg_by_road": {"north": 4.0, "south": 0.0, "east": 0.0, "west": 0.0},
+            "waiting_max_by_road": {"north": 4.0, "south": 0.0, "east": 0.0, "west": 0.0},
+            "avg_queue_length_by_road": {"north": 1.0, "south": 0.0, "east": 0.0, "west": 0.0},
+            "final_flow_by_road": {"north": 1.0, "south": 0.0, "east": 0.0, "west": 0.0},
+            "signal_phase_applications": 1,
+            "applied_phase_sequence": [0],
+            "emergency_active_steps": 0,
+        }
+
+    monkeypatch.setattr(backend_mod, "run_simulation", fake_run_simulation)
+    client = TestClient(backend_mod.app)
+
+    started = client.post(
+        "/api/controller/start",
+        params={"scenario": str(scen_file), "max_steps": 3},
+    )
+    assert started.status_code == 200
+    assert started.json()["scenario"] == "balanced"
+
+    status = client.get("/api/controller/status").json()
+    assert status["running"] is False
+    assert status["last_error"] is None
+    assert status["latest_results"]["steps"] == 3
+
+    traffic = client.get("/api/traffic").json()
+    assert traffic["north"]["queue"] == pytest.approx(1.0)
+    assert traffic["north"]["waiting_seconds"] == pytest.approx(4.0)
