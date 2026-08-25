@@ -414,7 +414,52 @@ def test_emergency_priority_only_triggers_when_actually_approaching():
 
 
 def test_emergency_priority_still_goes_through_safety_transition():
-    pytest.skip("TODO: controller/emergency_controller.py + state_machine.py")
+    """Emergency priority cuts the min-green wait but NEVER skips yellow/all-red.
+
+    Drive the real SafetyStateMachine + EmergencyController + priority with a
+    single approaching ambulance, then walk the timers and assert the exact
+    GREEN -> YELLOW -> ALL_RED -> GREEN(road) sequence — the three safety
+    stages are mandatory even for an emergency.
+    """
+    from controller.emergency_controller import EmergencyController
+    from controller.state_machine import SafetyStateMachine, SignalPhase
+    from emergency.priority import select_priority_emergency
+    from emergency.tracker import EmergencyVehicleState
+    from emergency.trajectory import required_movement
+
+    signal = dict(_SIGNAL_CFG)  # min=10, yellow=3, all_red=2, maxgreen=60
+    sm = SafetyStateMachine(signal)
+
+    class FakePriority:
+        def select_priority_emergency(self, emergencies, phase):
+            return select_priority_emergency(emergencies, phase)
+
+    class FakeTrajectory:
+        def required_movement(self, state, history):
+            return required_movement(state, history)
+
+    controller = EmergencyController(sm, FakePriority(), FakeTrajectory())
+
+    # A single approaching ambulance on the south approach.
+    amb = EmergencyVehicleState(
+        track_id=1, cls="ambulance", road="south", movement=None,
+        distance_to_intersection=100.0, approaching_intersection=True,
+    )
+
+    # t=3: well before min_green (10s) — an emergency request still accepted,
+    # but the FSM immediately leaves GREEN for YELLOW.
+    assert controller.handle([amb], 3.0) is True
+    assert sm.phase is SignalPhase.YELLOW
+    assert sm.green_roads() == []  # no conflicting green remains
+
+    # 3s of yellow (t=3..6), then all-red for 2s (t=6..8), then green.
+    sm.tick(6.0)
+    assert sm.phase is SignalPhase.ALL_RED
+    sm.tick(8.0)
+    assert sm.phase is SignalPhase.GREEN
+    assert sm.current_green_road() == "south"
+    # The safety sequence was never skipped: we saw yellow then all-red.
+    assert sm.pending_road() is None
 
 
 def test_dataset_split_has_no_video_leakage_across_train_test():
