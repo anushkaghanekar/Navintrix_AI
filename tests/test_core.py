@@ -191,19 +191,20 @@ def test_fairness_forces_green_after_max_wait():
     tracker = FairnessTracker(max_wait_seconds=90.0)
     assert tracker.road_forcing_green(50.0) is None      # nobody starved yet
 
-    tracker.on_green_granted("north", 0.0)
-    tracker.on_green_granted("south", 0.0)
-    tracker.on_green_granted("east", 0.0)
-    # Let west wait past the 90s ceiling.
-    tracker.on_green_granted("west", 0.0)
-    forced = tracker.road_forcing_green(120.0)
-    assert forced is None  # all waited ~120s > 90, but tie -> worst offender still matters
+    tracker = FairnessTracker(max_wait_seconds=90.0)
+    assert tracker.road_forcing_green(50.0) is None      # nobody starved yet
 
-    # Make west the clear worst offender.
+    # Everyone granted at 0: by t=120 all exceed the 90s ceiling, so a
+    # road IS forced (deterministic tie-break picks the first in iteration).
+    for road in ("north", "south", "east", "west"):
+        tracker.on_green_granted(road, 0.0)
+    assert tracker.road_forcing_green(120.0) in ("north", "south", "east", "west")
+
+    # Make west the clear worst offender (all others got green at 100).
     tracker.on_green_granted("north", 100.0)
     tracker.on_green_granted("south", 100.0)
     tracker.on_green_granted("east", 100.0)
-    # west still last granted at 0 -> waited 120s, overshoot 30s
+    # west last granted at 0 -> waited 120s, overshoot 30s; others only 20s
     assert tracker.road_forcing_green(120.0) == "west"
 
 
@@ -281,16 +282,139 @@ def test_adaptive_empty_metrics_is_noop():
     assert controller.state_machine.calls == []
 
 
+# ---------------------------------------------------------------------------
+# emergency/  (detector, tracker, trajectory, priority)
+# ---------------------------------------------------------------------------
+
+def _mkv(track_id, road, current, previous, cls="ambulance"):
+    """Build a TrackedVehicle on a named road at current/previous positions."""
+    from tracking.bytetrack import TrackedVehicle
+
+    return TrackedVehicle(
+        track_id=track_id, cls=cls, confidence=0.9,
+        current_position=current, previous_position=previous,
+        first_seen_time=0, last_seen_time=1, road=road,
+    )
+
+
+def test_emergency_is_approaching_intersection():
+    from emergency.detector import is_approaching_intersection
+
+    cfg = _load_intersection()  # center is (480, 480); north approach is the top edge
+    # A vehicle on the north approach moving south (down, toward center) -> True.
+    approaching = _mkv(1, "north", (480, 150), (480, 100))
+    assert is_approaching_intersection(approaching, cfg) is True
+    # Moving away (north, up/skyward, away from center) -> False.
+    moving_away = _mkv(2, "north", (480, 100), (480, 150))
+    assert is_approaching_intersection(moving_away, cfg) is False
+    # Parked / no movement -> False.
+    parked = _mkv(3, "north", (400, 150), (400, 150))
+    assert is_approaching_intersection(parked, cfg) is False
+    # No previous position (brand-new track) -> False (conservative).
+    fresh = _mkv(4, "north", (400, 150), None)
+    assert is_approaching_intersection(fresh, cfg) is False
+    # Not on a road -> False.
+    off_road = _mkv(5, None, (400, 150), (400, 100))
+    assert is_approaching_intersection(off_road, cfg) is False
+
+
+def test_emergency_tracker_clearance_after_consecutive_frames():
+    from emergency.tracker import EmergencyTracker
+
+    cfg = _load_intersection()
+    tracker = EmergencyTracker(clearance_confirmation_frames=3)
+
+    # Frame 1: approaching (moving toward center, north approach -> down).
+    st = tracker.update(_mkv(1, "north", (480, 150), (480, 100)), cfg)
+    assert st.approaching_intersection is True
+    assert st.cleared is False
+    assert st.distance_to_intersection is not None
+
+    # Next 3 frames: NOT approaching (moving up, away) -> cleared after 3.
+    st = None
+    for _ in range(3):
+        st = tracker.update(_mkv(1, "north", (480, 100), (480, 150)), cfg)
+    assert st.cleared is True
+    assert st.frames_not_approaching >= 3
+
+
+def test_emergency_tracker_requires_consecutive_misses_to_clear():
+    from emergency.tracker import EmergencyTracker
+
+    cfg = _load_intersection()
+    tracker = EmergencyTracker(clearance_confirmation_frames=3)
+    # A "not approaching" frame, then a reappearance resets the counter.
+    tracker.update(_mkv(1, "north", (480, 150), (480, 100)), cfg)   # approaching
+    tracker.update(_mkv(1, "north", (480, 100), (480, 150)), cfg)   # away (miss 1)
+    tracker.update(_mkv(1, "north", (480, 150), (480, 100)), cfg)   # approaching -> reset
+    st = tracker.update(_mkv(1, "north", (480, 150), (480, 100)), cfg)
+    assert st.cleared is False  # the reset prevented premature clearance
+
+
+def test_emergency_required_movement_infers_and_falls_back():
+    from emergency.trajectory import required_movement
+    from emergency.tracker import EmergencyVehicleState
+
+    state = EmergencyVehicleState(
+        track_id=1, cls="ambulance", road="east",
+        movement=None, distance_to_intersection=50.0,
+        approaching_intersection=True,
+    )
+    # Entered east, heading toward north -> east->north = right (config table:
+    # a vehicle coming from the east traveling west turns right to head north).
+    assert required_movement(state, ["east", "east", "north"]) == "right"
+    # Entry east, exit west -> straight.
+    assert required_movement(state, ["east", "west"]) == "straight"
+    # Entry east, exit south -> left.
+    assert required_movement(state, ["east", "south"]) == "left"
+    # No meaningful exit yet -> "unknown" (serve whole road).
+    assert required_movement(state, ["east", "east"]) == "unknown"
+
+
+def test_emergency_priority_selects_deterministically():
+    from emergency.priority import select_priority_emergency
+    from emergency.tracker import EmergencyVehicleState
+
+    def state(track_id, cls, dist, approaching=True):
+        return EmergencyVehicleState(
+            track_id=track_id, cls=cls, road="north", movement=None,
+            distance_to_intersection=dist, approaching_intersection=approaching,
+        )
+
+    # No approaching -> None.
+    assert select_priority_emergency([state(1, "ambulance", 10, approaching=False)], None) is None
+    # Single approaching -> returns it.
+    single = state(2, "ambulance", 5)
+    assert select_priority_emergency([single], None) is single
+    # Multiple: closest first.
+    close = state(3, "fire_truck", 2)
+    far = state(4, "ambulance", 50)
+    assert select_priority_emergency([far, close], None) is close
+    # Same distance -> class priority (ambulance wins).
+    amb = state(5, "ambulance", 2)
+    fire = state(6, "fire_truck", 2)
+    assert select_priority_emergency([fire, amb], None) is amb
+
+
 def test_emergency_priority_only_triggers_when_actually_approaching():
-    pytest.skip("TODO: emergency/detector.py's is_approaching_intersection")
+    from emergency.detector import is_approaching_intersection
+    from emergency.priority import select_priority_emergency
+    from emergency.tracker import EmergencyVehicleState
+
+    cfg = _load_intersection()
+    # A tracked vehicle moving AWAY is not approaching -> priority returns None
+    # even though it is an emergency class.
+    moving_away = _mkv(1, "north", (480, 100), (480, 150))
+    assert is_approaching_intersection(moving_away, cfg) is False
+    state = EmergencyVehicleState(
+        track_id=1, cls="ambulance", road="north", movement=None,
+        distance_to_intersection=50.0, approaching_intersection=False,
+    )
+    assert select_priority_emergency([state], None) is None
 
 
 def test_emergency_priority_still_goes_through_safety_transition():
     pytest.skip("TODO: controller/emergency_controller.py + state_machine.py")
-
-
-def test_fairness_forces_green_after_max_wait():
-    pytest.skip("TODO: controller/fairness.py")
 
 
 def test_dataset_split_has_no_video_leakage_across_train_test():
