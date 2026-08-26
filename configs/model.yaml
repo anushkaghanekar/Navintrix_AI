@@ -42,3 +42,13 @@ datasets:
       bus: bus
       van: truck
       others: null
+  # Optional per-source mapping for scripts/prepare_emergency.py. Each
+  # emergency source may name its classes differently (e.g. "police_car" vs
+  # "police"); map them onto the classes.emergency set here, or to `null` to
+  # drop a foreign class. Unlisted source classes that ARE emergency classes
+  # fall back to identity; unlisted foreign classes are dropped with a count.
+  # emergency:
+  #   class_mapping:
+  #     police: police_vehicle
+  #     police_car: police_vehicle
+  #     cyclist: null

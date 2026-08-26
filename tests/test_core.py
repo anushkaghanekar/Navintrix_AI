@@ -662,6 +662,108 @@ def test_prepare_detrac_end_to_end_yolo_layout(tmp_path):
     assert summary["classes_kept_counts"] == {"car": 1, "motorcycle": 0, "bus": 1, "truck": 1}
     assert summary["classes_dropped_counts"] == {"others": 1}
 
+def test_prepare_emergency_merges_sources_and_resolves_classes(tmp_path):
+    """Two Roboflow-style YOLO sources are merged into one consistent
+    emergency dataset: class-name conflicts resolve through the config
+    mapping, each source keeps its own train/valid/test split, foreign
+    classes are dropped and counted, and image-less labels are reported
+    unmatched."""
+    from PIL import Image
+
+    from scripts.prepare_emergency import run_prep
+
+    raw = tmp_path / "raw"
+    src_a = raw / "ambulance_set"
+    src_b = raw / "police_set"
+
+    # Source A: classes.txt (ambulance, police) with train/test split.
+    (src_a / "train" / "images").mkdir(parents=True)
+    (src_a / "train" / "labels").mkdir(parents=True)
+    (src_a / "test" / "images").mkdir(parents=True)
+    (src_a / "test" / "labels").mkdir(parents=True)
+    (src_a / "classes.txt").write_text("ambulance\npolice", encoding="utf-8")
+    Image.new("RGB", (64, 48), color=(1, 2, 3)).save(src_a / "train" / "images" / "a1.jpg")
+    (src_a / "train" / "labels" / "a1.txt").write_text(
+        "0 0.5 0.5 0.2 0.2\n1 0.3 0.3 0.1 0.1",  # ambulance + police
+        encoding="utf-8",
+    )
+    Image.new("RGB", (64, 48), color=(4, 5, 6)).save(src_a / "train" / "images" / "a_empty.jpg")
+    (src_a / "train" / "labels" / "a_empty.txt").write_text("", encoding="utf-8")
+    Image.new("RGB", (64, 48), color=(7, 8, 9)).save(src_a / "test" / "images" / "a_test.jpg")
+    (src_a / "test" / "labels" / "a_test.txt").write_text("0 0.5 0.5 0.3 0.3", encoding="utf-8")
+    # A label with no paired image -> unmatched.
+    (src_a / "train" / "labels" / "orphan.txt").write_text("0 0.5 0.5 0.2 0.2", encoding="utf-8")
+
+    # Source B: uses differing-but-synonymous class names + one foreign class;
+    # pulled from data.yaml with a {id: name} map.
+    (src_b / "valid" / "images").mkdir(parents=True)
+    (src_b / "valid" / "labels").mkdir(parents=True)
+    (src_b / "data.yaml").write_text("names:\n  0: police_car\n  1: fire_truck\n  2: cyclist\n", encoding="utf-8")
+    Image.new("RGB", (64, 48), color=(10, 11, 12)).save(src_b / "valid" / "images" / "b1.jpg")
+    (src_b / "valid" / "labels" / "b1.txt").write_text(
+        "0 0.5 0.5 0.4 0.2\n1 0.6 0.6 0.3 0.4\n2 0.2 0.2 0.1 0.1",  # police_car, fire_truck, cyclist
+        encoding="utf-8",
+    )
+
+    out = tmp_path / "out"
+    config = tmp_path / "model.yaml"
+    config.write_text(
+        """
+
+classes:
+  normal: [car]
+  emergency: [ambulance, fire_truck, police_vehicle]
+datasets:
+  emergency:
+    class_mapping:
+      police: police_vehicle
+      police_car: police_vehicle
+      cyclist: null
+""",
+        encoding="utf-8",
+    )
+    summary = run_prep(raw, out, config)
+
+    # merged layout: <split>/<source>_<stem>
+    assert (out / "images" / "train" / "ambulance_set_a1.jpg").is_file()
+    label_a1 = (out / "labels" / "train" / "ambulance_set_a1.txt").read_text()
+    assert label_a1.splitlines() == ["0 0.5 0.5 0.2 0.2", "2 0.3 0.3 0.1 0.1"]
+    # empty label preserved
+    assert (out / "labels" / "train" / "ambulance_set_a_empty.txt").read_text() == ""
+    # split preserved
+    assert (out / "images" / "test" / "ambulance_set_a_test.jpg").is_file()
+    # source B: police_car -> police_vehicle(id 2), fire_truck(id 1), cyclist dropped
+    assert (out / "labels" / "valid" / "police_set_b1.txt").read_text().splitlines() == [
+        "2 0.5 0.5 0.4 0.2",
+        "1 0.6 0.6 0.3 0.4",
+    ]
+    assert summary["classes_kept_counts"] == {
+        "ambulance": 2, "fire_truck": 1, "police_vehicle": 2,
+    }
+    assert summary["classes_dropped_counts"] == {"cyclist": 1}
+    assert summary["split_counts"] == {"train": 2, "valid": 1, "test": 1}
+    assert summary["per_source"]["ambulance_set"]["unmatched_labels"] == 1
+    # data.yaml lists emergency classes in id order
+    ds = (out / "data.yaml").read_text()
+    assert ds == ("names:\n  0: ambulance\n  1: fire_truck\n  2: police_vehicle\n")
+
+
+def test_prepare_emergency_rejects_bad_mapping_and_needs_classes(tmp_path):
+    from scripts.prepare_emergency import _load_emergency_config
+
+    bad = tmp_path / "bad.yaml"
+    bad.write_text(
+        "classes:\n  emergency: [ambulance, fire_truck]\n"
+        "datasets:\n  emergency:\n    class_mapping:\n      ambulance: school_bus\n",
+        encoding="utf-8",
+    )
+    try:
+        _load_emergency_config(bad)
+        assert False, "expected SystemExit for a mapping target outside classes.emergency"
+    except SystemExit:
+        pass
+
+
 def test_prepare_detrac_flattened_prefix_layout(tmp_path):
     """Flattened/remixed mirrors named <SEQ><sep><frame>[...] match by sequence
     prefix (not the token-before-first-separator) and the digit run after the
