@@ -61,6 +61,45 @@ def load_class_names(config_path: str = DEFAULT_CONFIG_PATH) -> list[str]:
     return [str(name) for name in normal] + [str(name) for name in emergency]
 
 
+def load_detector_config(config_path: str = DEFAULT_CONFIG_PATH) -> dict:
+    """Return model runtime settings from configs/model.yaml.
+
+    Keeps weights/thresholds config-driven so backend, scripts, and
+    evaluation code do not repeat defaults in application logic.
+    """
+    with open(config_path) as f:
+        cfg = yaml.safe_load(f) or {}
+    model_cfg = cfg.get("model")
+    if not isinstance(model_cfg, dict):
+        raise ValueError(f"config {config_path} must define a 'model' mapping")
+
+    required = ("weights_path", "confidence_threshold", "iou_threshold")
+    missing = [key for key in required if key not in model_cfg]
+    if missing:
+        raise ValueError(
+            f"config {config_path}: model is missing {', '.join(missing)}"
+        )
+
+    try:
+        return {
+            "weights_path": str(model_cfg["weights_path"]),
+            "confidence_threshold": float(model_cfg["confidence_threshold"]),
+            "iou_threshold": float(model_cfg["iou_threshold"]),
+            "class_names": load_class_names(config_path),
+        }
+    except (TypeError, ValueError) as exc:
+        raise ValueError(
+            f"config {config_path}: confidence_threshold and iou_threshold "
+            "must be numeric"
+        ) from exc
+
+
+def build_detector(config_path: str = DEFAULT_CONFIG_PATH) -> "VehicleDetector":
+    """Build a VehicleDetector using weights and thresholds from config."""
+    detector_cfg = load_detector_config(config_path)
+    return VehicleDetector(**detector_cfg)
+
+
 def _result_to_detections(result, class_names: list[str], min_confidence: float) -> list[Detection]:
     """Convert one ultralytics inference Result into Detection objects.
 

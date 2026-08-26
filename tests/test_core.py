@@ -726,6 +726,62 @@ def test_detector_class_names_from_config_in_training_order():
                      "ambulance", "fire_truck", "police_vehicle"]
 
 
+def test_build_detector_uses_model_yaml_runtime_settings(tmp_path, monkeypatch):
+    import sys
+    import types
+
+    from detection.detector import build_detector
+
+    config = tmp_path / "model.yaml"
+    config.write_text(
+        """
+model:
+  weights_path: custom/best.pt
+  confidence_threshold: 0.42
+  iou_threshold: 0.33
+classes:
+  normal: [car, bus]
+  emergency: [ambulance]
+""",
+        encoding="utf-8",
+    )
+
+    class FakeYOLO:
+        def __init__(self, weights_path):
+            self.weights_path = weights_path
+            self.names = {0: "car", 1: "bus", 2: "ambulance"}
+
+    monkeypatch.setitem(sys.modules, "ultralytics", types.SimpleNamespace(YOLO=FakeYOLO))
+    detector = build_detector(str(config))
+
+    assert detector.weights_path == "custom/best.pt"
+    assert detector.confidence_threshold == pytest.approx(0.42)
+    assert detector.iou_threshold == pytest.approx(0.33)
+    assert detector.class_names == ["car", "bus", "ambulance"]
+    assert detector.model.weights_path == "custom/best.pt"
+
+
+def test_load_detector_config_rejects_missing_model_settings(tmp_path):
+    import pytest
+
+    from detection.detector import load_detector_config
+
+    config = tmp_path / "model.yaml"
+    config.write_text(
+        """
+model:
+  weights_path: custom/best.pt
+classes:
+  normal: [car]
+  emergency: []
+""",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="confidence_threshold"):
+        load_detector_config(str(config))
+
+
 def test_detector_result_to_detections_maps_indexes_and_filters_confidence():
     from detection.detector import _result_to_detections
 
