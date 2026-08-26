@@ -74,7 +74,7 @@ def is_approaching_intersection(tracked_vehicle, roi_config) -> bool:
       * the vehicle is attributed to a road (counting/roi.py) and has a
         previous position (so we can measure its motion);
       * the movement this frame is toward the intersection center
-        (``_distance_is_positive``), not away from it and not parked.
+        (``_is_moving_toward``), not away from it and not parked.
     A brand-new or parked vehicle fails these checks and is never treated as
     an active emergency approach — emergency priority must not fire on
     ambiguous evidence.
