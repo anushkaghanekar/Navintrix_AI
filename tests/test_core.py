@@ -662,6 +662,51 @@ def test_prepare_detrac_end_to_end_yolo_layout(tmp_path):
     assert summary["classes_kept_counts"] == {"car": 1, "motorcycle": 0, "bus": 1, "truck": 1}
     assert summary["classes_dropped_counts"] == {"others": 1}
 
+def test_prepare_detrac_flattened_prefix_layout(tmp_path):
+    """Flattened/remixed mirrors named <SEQ><sep><frame>[...] match by sequence
+    prefix (not the token-before-first-separator) and the digit run after the
+    sequence name is used as the frame number — not the first digit group."""
+    from scripts.prepare_detrac import _frame_of_image, _match_seq_for_image
+
+    sequences = {"MVI_00001": {}, "MVI_00002": {}}
+    cases = [
+        ("MVI_00001_00042.jpg", "MVI_00001", 42),
+        ("MVI_00001_img00042.jpg", "MVI_00001", 42),
+        ("MVI_00002_7.jpg", "MVI_00002", 7),
+        ("MVI_00001.42.jpg", "MVI_00001", 42),  # dot-separator still supported
+    ]
+    for name, expect_seq, expect_frame in cases:
+        im = tmp_path / name
+        seq = _match_seq_for_image(im, sequences)
+        assert seq == expect_seq, name
+        assert _frame_of_image(im, seq) == expect_frame, name
+
+    # Stock layout (image in a per-sequence dir) is unchanged once seq is known.
+    assert _frame_of_image(tmp_path / "img00003.jpg", "MVI_00001") == 3
+    # An unrelated image is still unmatched.
+    assert _match_seq_for_image(tmp_path / "foo_bar_1.jpg", sequences) is None
+
+
+def test_emit_image_link_is_idempotent_on_rerun(tmp_path):
+    """Re-running prep with --link into an existing out_dir must not crash:
+    a prior run leaves dst hardlinked to src, and a second run would have hit
+    copy2's SameFileError (same inode) after FileExistsError on os.link."""
+    import os
+
+    from scripts.prepare_detrac import emit_image
+
+    src = tmp_path / "src.jpg"
+    src.write_bytes(b"data")
+    dst = tmp_path / "out" / "a.jpg"
+
+    assert emit_image(src, dst, link=True) == "hardlinked"
+    first_inode = os.stat(dst).st_ino
+    assert os.stat(src).st_ino == first_inode
+
+    # Second run into the same destination: idempotent, no exception.
+    assert emit_image(src, dst, link=True) == "hardlinked"
+    assert os.stat(dst).st_ino == first_inode
+    assert dst.read_bytes() == b"data"
 
 def test_prepare_aicity_preserves_camera_and_annotation_relationships(tmp_path):
     """AI City prep should preserve camera/video/ROI/movement relationships."""

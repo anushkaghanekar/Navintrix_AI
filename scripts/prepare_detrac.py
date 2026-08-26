@@ -168,23 +168,45 @@ def parse_detrac_xml(xml_path: Path) -> dict[int, list[dict]]:
 # ---- DISCOVERY ----
 
 
-def _frame_of_image(image: Path) -> int:
-    """Extract DETRAC's frame number from a filename like img00042.jpg."""
-    match = re.search(r"\d+", image.stem)
+def _frame_of_image(image: Path, seq_name: str | None = None) -> int:
+    """Extract DETRAC's frame number from a filename like img00042.jpg.
+
+    When ``seq_name`` is supplied and the filename begins with that sequence
+    name (e.g. MVI_00001_00042.jpg in a flattened mirror), the sequence
+    prefix — including the ``_`` or ``.`` separator — is stripped first so the
+    trailing digit run is the frame, not the sequence number. Otherwise the
+    first digit run is used, which is correct for the stock layout, whose
+    frame names (``imgNNNNN.jpg``) carry a single digit run.
+    """
+    name = image.stem
+    if seq_name is not None:
+        for sep in (f"{seq_name}_", f"{seq_name}."):
+            if name.startswith(sep):
+                name = name[len(sep):]
+                break
+    match = re.search(r"\d+", name)
     if match is None:
         raise ValueError(f"cannot extract a frame number from image filename: {image}")
     return int(match.group())
 
 
 def _match_seq_for_image(image: Path, sequences: dict) -> str | None:
-    """Match an image to a sequence by parent dir name, then filename prefix."""
+    """Match an image to a sequence by parent dir name, then filename prefix.
+
+    Flattened/remixed mirrors may put every frame in one directory named
+    ``<SEQ><sep><frame>`` (e.g. MVI_00001_00042.jpg or MVI_00001.42.jpg),
+    so after the parent-dir fast path we match on the longest sequence-name
+    prefix — resolving sequences that are prefixes of each other to the most
+    specific one.
+    """
     parent_name = image.parent.name
     if parent_name in sequences:
         return parent_name
-    for marker in ("_", "."):
-        prefix = image.stem.split(marker, 1)[0]
-        if prefix in sequences:
-            return prefix
+    stem = image.stem
+    for seq_name in sorted(sequences, key=len, reverse=True):
+        for sep in (f"{seq_name}_", f"{seq_name}."):
+            if stem.startswith(sep):
+                return seq_name
     return None
 
 
@@ -276,8 +298,18 @@ def load_config(config_path: Path) -> tuple[list[str], dict[str, str | None]]:
 
 
 def emit_image(src: Path, dst: Path, link: bool) -> str:
-    """Copy or hardlink an image file; returns the method used."""
+    """Copy or hardlink an image file; returns the method used.
+
+    Idempotent across re-runs: an existing destination (including a hardlink
+    to ``src`` created on a previous run) is removed before writing, so
+    re-running prep into the same out_dir neither crashes trying to link an
+    existing name nor trips ``copy2``'s same-file guard.
+    """
     dst.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        dst.unlink()
+    except OSError:
+        pass  # e.g. dst is a directory; a write below will surface it
     if link:
         try:
             os.link(src, dst)
@@ -362,13 +394,13 @@ def run_conversion(
             "link_tally": {"hardlinked": 0, "copied": 0},
         }
 
-        for image in sorted(record["images"], key=lambda p: (_frame_of_image(p), str(p))):
+        for image in sorted(record["images"], key=lambda p: (_frame_of_image(p, seq_name), str(p))):
             if not image.is_file():
                 raise FileNotFoundError(f"image listed but not readable: {image}")
             with Image.open(image) as opened:
                 width, height = opened.size
 
-            frame = _frame_of_image(image)
+            frame = _frame_of_image(image, seq_name)
             boxes: list[dict] = xml_frames.get(frame, [])
             if frame not in xml_frames:
                 print(
