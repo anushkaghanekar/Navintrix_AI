@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Four-way intersection network - node definitions (netconvert input).
+  Center junction "J" is a controlled (traffic-light) node; the tl ID is
+  "tl_1" (matches configs/signal.yaml simulation.traffic_light_id).
+  Coordinates are in NETWORK METERS. Build with:
+    netconvert -node-files intersection.nod.xml \
+               -edge-files intersection.edg.xml \
+               -additional-files intersection.add.xml \
+               -output-file intersection.net.xml
+  This produces the gitignored intersection.net.xml that the *.sumocfg
+  files reference. The junction sits at (0,0); approaches are 500 m out.
+-->
+<nodes>
+    <node id="N" x="0.00"  y="500.00"/>   <!-- north outer terminal -->
+    <node id="S" x="0.00"  y="-500.00"/>  <!-- south outer terminal -->
+    <node id="E" x="500.00" y="0.00"/>    <!-- east  outer terminal -->
+    <node id="W" x="-500.00" y="0.00"/>   <!-- west  outer terminal -->
+    <node id="J" x="0.00"  y="0.00" type="traffic_light"/>
+</nodes>

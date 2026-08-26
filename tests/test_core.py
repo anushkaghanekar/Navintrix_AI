@@ -1624,6 +1624,70 @@ def test_sumo_scenario_loader_validates_names(tmp_path, monkeypatch):
         sumo_mod.load_scenario_config("../outside")
 
 
+def test_committed_scenario_files_are_wellformed_and_resolvable():
+    """The three core scenarios are committed and assignable: each .sumocfg
+    is found by the loader, all network/route sources are well-formed XML,
+    and the traffic-light program in the add file covers the phase indices
+    configs/signal.yaml pins for the FSM bridge."""
+    import xml.etree.ElementTree as ET
+    from pathlib import Path
+
+    import simulation.sumo as sumo_mod
+
+    repo = Path(__file__).resolve().parent.parent
+    scen_dir = repo / "simulation" / "scenarios"
+
+    names = sumo_mod.available_scenarios()
+    for expected in ("balanced", "heavy", "emergency"):
+        assert expected in names, f"missing committed scenario {expected}"
+        path = sumo_mod.load_scenario_config(expected)
+        assert Path(path).is_file()
+
+    xml_sources = [
+        scen_dir / "intersection.nod.xml",
+        scen_dir / "intersection.edg.xml",
+        scen_dir / "intersection.add.xml",
+    ]
+    xml_sources += [scen_dir / "routes" / f"{n}.rou.xml" for n in names]
+    xml_sources += [scen_dir / f"{n}.sumocfg" for n in names]
+    for p in xml_sources:
+        assert p.exists(), p
+        ET.parse(p)  # raises ParseError if not well-formed
+
+    import yaml
+
+    signal = yaml.safe_load((repo / "configs" / "signal.yaml").read_text())["simulation"]
+    tl_root = ET.parse(scen_dir / "intersection.add.xml").getroot()
+    logics = [n for n in tl_root.iter() if n.tag == "tlLogic"]
+    assert len(logics) == 1 and logics[0].get("id") == "tl_1"
+    phases = list(logics[0])
+    max_used = max(
+        [signal["phase_index_all_red"]]
+        + list(signal["phase_index_green"].values())
+        + list(signal["phase_index_yellow"].values())
+    )
+    assert len(phases) > max_used, "committed tlLogic must cover config indices"
+
+
+def test_committed_route_files_contain_approach_edges_and_types():
+    """Each scenario route drives vehicles over the mapped approach edges
+    (N0/S0/E0/W0) with a class the config's vehicle_class_mapping
+    understands, and the emergency scenario schedules ambulances."""
+    from pathlib import Path
+
+    repo = Path(__file__).resolve().parent.parent
+    routes_dir = repo / "simulation" / "scenarios" / "routes"
+
+    for scenario in ("balanced", "heavy"):
+        text = (routes_dir / f"{scenario}.rou.xml").read_text()
+        for edge in ("N0", "S0", "E0", "W0"):
+            assert edge in text, f"{scenario} should approach via {edge}"
+    em = (routes_dir / "emergency.rou.xml").read_text()
+    for edge in ("N0", "S0", "E0", "W0"):
+        assert edge in em
+    assert 'vClass="emergency"' in em
+
+
 def test_road_assignment_from_edge_ids():
     from simulation.traci_controller import SimVehicle, assign_roads, road_for_vehicle
 

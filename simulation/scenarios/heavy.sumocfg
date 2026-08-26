@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Heavy scenario: high sustained demand on all approaches (queue build-up). -->
+<configuration>
+    <input>
+        <net-file value="intersection.net.xml"/>
+        <route-files value="routes/heavy.rou.xml"/>
+    </input>
+    <time>
+        <begin value="0"/>
+        <end value="3600"/>
+        <step-length value="1"/>
+    </time>
+    <report>
+        <no-step-log value="true"/>
+        <no-warnings value="false"/>
+    </report>
+</configuration>

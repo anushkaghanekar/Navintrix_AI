@@ -77,4 +77,6 @@ simulation:
   # this is null, approach verification cannot run, so emergency priority
   # stays OFF in simulation (conservative default, same policy as
   # emergency.min_distance_to_confirm_approach_m above).
-  intersection_center_m: null
+  # The four-way scenario network centers its controlled junction J at the
+  # origin, so the center is (0, 0) network meters.
+  intersection_center_m: [0.0, 0.0]

@@ -65,6 +65,29 @@ SUMO must be installed separately (`sumo`, `sumo-gui`, and the `SUMO_HOME`
 environment variable set) — see https://sumo.dlr.de/docs/Installing/index.html.
 It's free and works fine for a zero-budget project.
 
+## Running the SUMO simulation + experiments
+
+The three core scenarios (balanced / heavy / emergency) are committed as
+**source** files under `simulation/scenarios/` (network nodes/edges, the
+tl_1 traffic-light program, and deterministic route files). The generated
+SUMO network (`intersection.net.xml`) is a build artifact and is gitignored.
+
+Requires a SUMO installation (`sumo`, `netconvert` on PATH, SUMO_HOME set),
+plus `pip install traci sumolib`.
+
+```bash
+# 1. Build the shared network + verify the tl program against config
+bash scripts/build_sumo_scenarios.sh
+
+# 2. Run Experiment 1 (fixed-time vs density-only vs proposed) and
+#    Experiment 4 (emergency priority on/off) across the 3 scenarios,
+#    writing raw result JSONs to evaluation/results/
+python scripts/run_experiments.py --scenarios balanced heavy emergency
+```
+
+The experiment runners do not fabricate numbers — they only write what the
+real TraCI run produced, so the report/plots can trace back to those JSONs.
+
 ## Team roles (suggested 4-way split)
 
 | Role | Owns | Primary folders |

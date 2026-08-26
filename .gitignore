@@ -11,9 +11,18 @@ datasets/*
 !datasets/.gitkeep
 models/*.pt
 
-# SUMO outputs
-simulation/scenarios/*.xml
+# SUMO: generated networks are build outputs (gitignored); XML *sources* and
+# the scenario route/configs are committed so scenarios are reproducible.
+simulation/scenarios/*.net.xml
+!simulation/scenarios/*.nod.xml
+!simulation/scenarios/*.edg.xml
+!simulation/scenarios/*.add.xml
+!simulation/scenarios/*.rou.xml
+!simulation/scenarios/*.sumocfg
 !simulation/scenarios/.gitkeep
+
+# Experiment outputs (regenerable on a SUMO-capable machine)
+evaluation/results/
 
 # Python
 __pycache__/

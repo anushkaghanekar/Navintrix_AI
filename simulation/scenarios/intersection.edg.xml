@@ -1,0 +1,54 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Four-way intersection - edge definitions (netconvert input).
+
+  Edge IDs below are the approach IDs configs/signal.yaml maps to roads via
+  simulation.edge_to_road:
+      N0 : from N, heading SOUTH toward J  => "north" approach
+      S0 : from S, heading NORTH toward J  => "south" approach
+      E0 : from E, heading WEST  toward J  => "east"  approach
+      W0 : from W, heading EAST  toward J  => "west"  approach
+  Outgoing edges (N1/S1/E1/W1) let a vehicle that crosses the junction keep
+  going so run_simulation's edge-transition detection fires when it leaves
+  the approach edge.
+
+  Only straight movements are connected (single lane each), so the tlLogic
+  at J controls exactly 4 connections - fixing the traffic-light state string
+  length to 4 (see intersection.add.xml).
+-->
+<edges>
+    <!-- Approaches (incoming to the controlled junction) -->
+    <edge id="N0" from="N" to="J">
+        <lane id="N0_0" index="0" speed="13.00" length="500.00"/>
+    </edge>
+    <edge id="S0" from="S" to="J">
+        <lane id="S0_0" index="0" speed="13.00" length="500.00"/>
+    </edge>
+    <edge id="E0" from="E" to="J">
+        <lane id="E0_0" index="0" speed="13.00" length="500.00"/>
+    </edge>
+    <edge id="W0" from="W" to="J">
+        <lane id="W0_0" index="0" speed="13.00" length="500.00"/>
+    </edge>
+    <!-- Outgoing -->
+    <edge id="N1" from="J" to="N">
+        <lane id="N1_0" index="0" speed="13.00" length="500.00"/>
+    </edge>
+    <edge id="S1" from="J" to="S">
+        <lane id="S1_0" index="0" speed="13.00" length="500.00"/>
+    </edge>
+    <edge id="E1" from="J" to="E">
+        <lane id="E1_0" index="0" speed="13.00" length="500.00"/>
+    </edge>
+    <edge id="W1" from="J" to="W">
+        <lane id="W1_0" index="0" speed="13.00" length="500.00"/>
+    </edge>
+
+    <!-- Explicit straight-only connections: exactly 4 links at J -->
+    <connections>
+        <connection from="N0" to="S1" fromLane="0" toLane="0" dir="s"/>
+        <connection from="S0" to="N1" fromLane="0" toLane="0" dir="s"/>
+        <connection from="E0" to="W1" fromLane="0" toLane="0" dir="s"/>
+        <connection from="W0" to="E1" fromLane="0" toLane="0" dir="s"/>
+    </connections>
+</edges>

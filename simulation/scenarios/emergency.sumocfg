@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Emergency scenario: light normal demand + scheduled ambulances that
+     conflict with the FSM's currently-given axis, exercising emergency
+     priority (runs once simulation.intersection_center_m is set). -->
+<configuration>
+    <input>
+        <net-file value="intersection.net.xml"/>
+        <route-files value="routes/emergency.rou.xml"/>
+    </input>
+    <time>
+        <begin value="0"/>
+        <end value="3600"/>
+        <step-length value="1"/>
+    </time>
+    <report>
+        <no-step-log value="true"/>
+        <no-warnings value="false"/>
+    </report>
+</configuration>
