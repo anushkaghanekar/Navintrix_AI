@@ -336,13 +336,28 @@ class VehicleTracker:
     def from_config(cls, config_path: str = DEFAULT_CONFIG_PATH) -> "VehicleTracker":
         """Build a tracker from the `tracker` block of configs/model.yaml."""
         with open(config_path) as f:
-            cfg = yaml.safe_load(f)
-        tracker_cfg = cfg["tracker"]
+            cfg = yaml.safe_load(f) or {}
+        tracker_cfg = cfg.get("tracker")
+        if not isinstance(tracker_cfg, dict):
+            raise ValueError(f"config {config_path} must define a 'tracker' mapping")
+        tracker_name = tracker_cfg.get("name", "bytetrack")
+        if tracker_name != "bytetrack":
+            raise ValueError(
+                f"config {config_path}: tracker.name must be 'bytetrack', got {tracker_name!r}"
+            )
+        required = ("track_buffer", "match_thresh", "track_thresh")
+        missing = [key for key in required if key not in tracker_cfg]
+        if missing:
+            raise ValueError(
+                f"config {config_path}: tracker is missing {', '.join(missing)}"
+            )
         kalman_cfg = tracker_cfg.get("kalman", {})
+        if not isinstance(kalman_cfg, dict):
+            raise ValueError(f"config {config_path}: tracker.kalman must be a mapping")
         return cls(
-            track_buffer=tracker_cfg["track_buffer"],
-            match_thresh=tracker_cfg["match_thresh"],
-            track_thresh=tracker_cfg.get("track_thresh", 0.5),
+            track_buffer=int(tracker_cfg["track_buffer"]),
+            match_thresh=float(tracker_cfg["match_thresh"]),
+            track_thresh=float(tracker_cfg["track_thresh"]),
             low_match_thresh=tracker_cfg.get("low_match_thresh", 0.5),
             kalman_process_std=float(kalman_cfg.get("process_std", 0.05)),
             kalman_measurement_std=float(kalman_cfg.get("measurement_std", 0.5)),

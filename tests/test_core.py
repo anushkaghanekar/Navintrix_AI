@@ -1048,6 +1048,47 @@ def test_tracker_from_config_reads_tracker_values():
     assert tracker.low_match_thresh == 0.5
 
 
+def test_tracker_from_config_rejects_missing_tracker_settings(tmp_path):
+    import pytest
+
+    from tracking.bytetrack import VehicleTracker
+
+    config = tmp_path / "model.yaml"
+    config.write_text(
+        """
+tracker:
+  name: bytetrack
+  track_buffer: 30
+  match_thresh: 0.8
+""",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="track_thresh"):
+        VehicleTracker.from_config(str(config))
+
+
+def test_tracker_from_config_rejects_wrong_tracker_name(tmp_path):
+    import pytest
+
+    from tracking.bytetrack import VehicleTracker
+
+    config = tmp_path / "model.yaml"
+    config.write_text(
+        """
+tracker:
+  name: sort
+  track_buffer: 30
+  match_thresh: 0.8
+  track_thresh: 0.5
+""",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="bytetrack"):
+        VehicleTracker.from_config(str(config))
+
+
 def test_tracker_moving_vehicle_keeps_single_id():
     """A vehicle translating between frames (IoU < 0.8) must not fragment.
 
