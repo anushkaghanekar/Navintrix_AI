@@ -551,6 +551,30 @@ def test_convert_annotations_clips_bounds_and_drops_unknown():
 def test_prepare_detrac_parse_handles_both_xml_dialects(tmp_path):
     from scripts.prepare_detrac import parse_detrac_xml
 
+    stock = tmp_path / "stock.xml"
+    stock.write_text(
+        """<sequence name="MVI_00000">
+        <frame num="4">
+          <target_list>
+            <target id="1">
+              <box left="15" top="25" width="35" height="45"/>
+              <attribute vehicle_type="car"/>
+            </target>
+            <target id="2">
+              <box left="50" top="60" width="70" height="80"/>
+              <attribute vehicle_type="bus"/>
+            </target>
+          </target_list>
+        </frame>
+        </sequence>"""
+    )
+    stock_frames = parse_detrac_xml(stock)
+    assert stock_frames[4][0] == {
+        "class_name": "car", "x1": 15.0, "y1": 25.0, "x2": 50.0, "y2": 70.0
+    }
+    assert stock_frames[4][1]["class_name"] == "bus"
+    assert stock_frames[4][1]["x2"] == 120.0
+
     official = tmp_path / "official.xml"
     official.write_text(
         """<sequence name="MVI_00001">

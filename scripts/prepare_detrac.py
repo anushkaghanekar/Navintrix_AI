@@ -15,10 +15,10 @@ Pipeline
    (same for test). Flattened/remixed mirror layouts are also understood as
    long as images map to a sequence XML by dir name or filename prefix;
    --images-dir / --annotations-dir override discovery for unusual trees.
-2. Parse each sequence XML into per-frame box lists — both the official
-   dialect (<frame_num>N</frame_num> followed by sibling <target> elements)
-   and the re-uploaded wrapper dialect (<frame num="N"> enclosing targets)
-   are handled.
+2. Parse each sequence XML into per-frame box lists — the stock UA-DETRAC
+   dialect (<frame num="N"><target_list><target>...</target_list>) plus
+   re-uploaded wrapper/direct-target and frame_num-sibling dialects are
+   handled.
 3. Map DETRAC classes to project classes from configs/model.yaml
    (datasets.detrac.class_mapping), e.g. `van -> truck`. DETRAC's catch-all
    `others` maps to `null`: it is a heterogeneous remainder category, and
@@ -84,7 +84,7 @@ def _vehicle_class(target: ET.Element) -> str | None:
     attribute = _find_child(target, "attribute")
     if attribute is None:
         return None
-    for key in ("vehicle", "class", "type"):
+    for key in ("vehicle", "vehicle_type", "class", "type"):
         value = attribute.attrib.get(key)
         if value:
             return value
@@ -121,10 +121,11 @@ def _parse_box(target: ET.Element) -> dict | None:
 def parse_detrac_xml(xml_path: Path) -> dict[int, list[dict]]:
     """Parse one DETRAC sequence XML into {frame_number: [boxes, ...]}.
 
-    Official UA-DETRAC annotations interleave `<frame_num>N</frame_num>`
-    with sibling `<target>` elements for that frame; several mirrors wrap
-    the same targets inside a `<frame num="N">` element instead. Both
-    dialects are handled. Boxes use a top-left origin to match YOLO.
+    Stock UA-DETRAC annotations wrap targets as
+    `<frame num="N"><target_list><target>...`; several mirrors use direct
+    `<frame num="N"><target>...` children or interleave `<frame_num>N</frame_num>`
+    with sibling `<target>` elements. All three dialects are handled. Boxes
+    use a top-left origin to match YOLO.
     """
     root = ET.parse(str(xml_path)).getroot()
     frames: dict[int, list[dict]] = {}
@@ -155,8 +156,8 @@ def parse_detrac_xml(xml_path: Path) -> dict[int, list[dict]]:
                 continue
             frame = int(str(raw).strip())
             frames.setdefault(frame, [])
-            for child in elem:  # targets wrapped inside <frame num=...>
-                if _truncated_tag(child.tag) == "target":
+            for child in elem.iter():  # stock target_list or direct frame targets
+                if child is not elem and _truncated_tag(child.tag) == "target":
                     add(child, force_frame=frame)
         elif tag == "target":
             add(elem)  # official dialect: target siblings after a <frame_num>
