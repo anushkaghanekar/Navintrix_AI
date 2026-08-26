@@ -61,3 +61,9 @@ density_weights:
   motorcycle: 0.5
   bus: 2.5
   truck: 2.5
+
+analytics:
+  # Vision pipeline queue threshold in pixels/frame. A tracked vehicle
+  # inside queue_roi with center displacement below this value counts as
+  # stopped/queued. Tune per camera FPS/resolution before real evaluation.
+  queue_velocity_threshold_px_per_frame: 1.0

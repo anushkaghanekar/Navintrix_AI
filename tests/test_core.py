@@ -1335,6 +1335,32 @@ def test_queue_length_counts_stopped_inside_region():
     assert estimate_queue_length([], queue_roi) == 0
 
 
+def test_queue_velocity_threshold_loads_from_config(tmp_path):
+    import pytest
+
+    from analytics.queue import load_queue_velocity_threshold
+
+    config = tmp_path / "intersection.yaml"
+    config.write_text(
+        """
+analytics:
+  queue_velocity_threshold_px_per_frame: 1.75
+""",
+        encoding="utf-8",
+    )
+    assert load_queue_velocity_threshold(str(config)) == pytest.approx(1.75)
+
+    config.write_text(
+        """
+analytics:
+  queue_velocity_threshold_px_per_frame: 0
+""",
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="must be > 0"):
+        load_queue_velocity_threshold(str(config))
+
+
 def test_waiting_time_accumulates_and_aggregates():
     from analytics.waiting_time import WaitingTimeTracker
 
