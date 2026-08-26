@@ -1263,6 +1263,35 @@ def test_movement_classify_uses_config_table():
     assert classify_movement("west", "east") == "straight"
 
 
+def test_movement_config_rejects_invalid_shape_and_labels(tmp_path):
+    import pytest
+
+    from counting.movement import load_movement_directions
+
+    bad_row = tmp_path / "bad_row.yaml"
+    bad_row.write_text(
+        """
+movement_directions:
+  north: [south, east]
+""",
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="north"):
+        load_movement_directions(str(bad_row))
+
+    bad_label = tmp_path / "bad_label.yaml"
+    bad_label.write_text(
+        """
+movement_directions:
+  north:
+    south: diagonal
+""",
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="diagonal"):
+        load_movement_directions(str(bad_label))
+
+
 # ---------------------------------------------------------------------------
 # analytics/  (density, queue, waiting_time, traffic_flow)
 # ---------------------------------------------------------------------------

@@ -26,6 +26,7 @@ from __future__ import annotations
 import yaml
 
 DEFAULT_CONFIG_PATH = "configs/intersection.yaml"
+VALID_MOVEMENTS = {"straight", "left", "right"}
 
 
 def load_movement_directions(
@@ -44,6 +45,17 @@ def load_movement_directions(
         )
     if not isinstance(directions, dict) or not directions:
         raise ValueError(f"{config_path}: 'movement_directions' must be a non-empty mapping")
+    for entry_road, exits in directions.items():
+        if not isinstance(exits, dict):
+            raise ValueError(
+                f"{config_path}: movement_directions[{entry_road!r}] must be a mapping"
+            )
+        for exit_road, label in exits.items():
+            if label not in VALID_MOVEMENTS:
+                raise ValueError(
+                    f"{config_path}: movement {entry_road!r}->{exit_road!r} "
+                    f"must be one of {sorted(VALID_MOVEMENTS)}, got {label!r}"
+                )
     return {
         entry: {exit_road: label for exit_road, label in exits.items()}
         for entry, exits in directions.items()
