@@ -26,10 +26,10 @@ from pathlib import Path
 DEFAULT_OUTDIR = "simulation/scenarios/routes"
 
 ROUTES = {
-    "N->S": ("N0", "S1"),
-    "S->N": ("S0", "N1"),
-    "E->W": ("E0", "W1"),
-    "W->E": ("W0", "E1"),
+    "NS": ("N0", "S1"),  # north approach -> south outgoing (straight southbound)
+    "SN": ("S0", "N1"),  # south approach -> north outgoing
+    "EW": ("E0", "W1"),  # east  approach -> west  outgoing
+    "WE": ("W0", "E1"),  # west  approach -> east  outgoing
 }
 
 VTYPES = {

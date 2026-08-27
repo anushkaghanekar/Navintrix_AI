@@ -16,5 +16,5 @@
     <node id="S" x="0.00"  y="-500.00"/>  <!-- south outer terminal -->
     <node id="E" x="500.00" y="0.00"/>    <!-- east  outer terminal -->
     <node id="W" x="-500.00" y="0.00"/>   <!-- west  outer terminal -->
-    <node id="J" x="0.00"  y="0.00" type="traffic_light"/>
+    <node id="J" x="0.00"  y="0.00" type="traffic_light" tl="tl_1"/>
 </nodes>

@@ -12,43 +12,37 @@
   going so run_simulation's edge-transition detection fires when it leaves
   the approach edge.
 
-  Only straight movements are connected (single lane each), so the tlLogic
-  at J controls exactly 4 connections - fixing the traffic-light state string
-  length to 4 (see intersection.add.xml).
+  netconvert auto-connects a full 4x4 mesh at J (16 controlled links, one
+  per incoming/outgoing pair), so the tlLogic in intersection.add.xml uses
+  16-char state strings and the FSM phase mapping in configs/signal.yaml is
+  index-aligned to this 5-phase program (see intersection.add.xml).
 -->
 <edges>
     <!-- Approaches (incoming to the controlled junction) -->
     <edge id="N0" from="N" to="J">
-        <lane id="N0_0" index="0" speed="13.00" length="500.00"/>
+        <lane index="0" speed="13.00" length="500.00"/>
     </edge>
     <edge id="S0" from="S" to="J">
-        <lane id="S0_0" index="0" speed="13.00" length="500.00"/>
+        <lane index="0" speed="13.00" length="500.00"/>
     </edge>
     <edge id="E0" from="E" to="J">
-        <lane id="E0_0" index="0" speed="13.00" length="500.00"/>
+        <lane index="0" speed="13.00" length="500.00"/>
     </edge>
     <edge id="W0" from="W" to="J">
-        <lane id="W0_0" index="0" speed="13.00" length="500.00"/>
+        <lane index="0" speed="13.00" length="500.00"/>
     </edge>
     <!-- Outgoing -->
     <edge id="N1" from="J" to="N">
-        <lane id="N1_0" index="0" speed="13.00" length="500.00"/>
+        <lane index="0" speed="13.00" length="500.00"/>
     </edge>
     <edge id="S1" from="J" to="S">
-        <lane id="S1_0" index="0" speed="13.00" length="500.00"/>
+        <lane index="0" speed="13.00" length="500.00"/>
     </edge>
     <edge id="E1" from="J" to="E">
-        <lane id="E1_0" index="0" speed="13.00" length="500.00"/>
+        <lane index="0" speed="13.00" length="500.00"/>
     </edge>
     <edge id="W1" from="J" to="W">
-        <lane id="W1_0" index="0" speed="13.00" length="500.00"/>
+        <lane index="0" speed="13.00" length="500.00"/>
     </edge>
 
-    <!-- Explicit straight-only connections: exactly 4 links at J -->
-    <connections>
-        <connection from="N0" to="S1" fromLane="0" toLane="0" dir="s"/>
-        <connection from="S0" to="N1" fromLane="0" toLane="0" dir="s"/>
-        <connection from="E0" to="W1" fromLane="0" toLane="0" dir="s"/>
-        <connection from="W0" to="E1" fromLane="0" toLane="0" dir="s"/>
-    </connections>
-</edges>
+    </edges>

@@ -1,24 +1,27 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!--
-  Traffic-light program for junction J (netconvert -additional-files).
+  Traffic-light program for junction J (netconvert -tllogic-files).
   The 5-phase program below MUST stay aligned with configs/signal.yaml:
       phase 0 -> north/south green   (simulation.phase_index_green.north/south)
       phase 1 -> north/south yellow  (simulation.phase_index_yellow.north/south)
       phase 2 -> east/west  green    (simulation.phase_index_green.east/west)
       phase 3 -> east/west  yellow   (simulation.phase_index_yellow.east/west)
       phase 4 -> all-red             (simulation.phase_index_all_red)
-  State strings have 4 chars because intersection.edg.xml declares exactly 4
-  controlled connections at J (one straight movement per approach).  Char
-  order is [north, south, east, west].  If netconvert reorders the links for
-  a different geometry the strings below must be regenerated to match; the
-  post-build check in scripts/build_sumo_scenarios.sh verifies this.
+  State strings are 16 chars because netconvert auto-connects a full 4x4 mesh
+  at the junction.  Char order (linkIndex, from netconvert):
+      0..3   N->{W,S,E,N}     4..7 E->{N,W,S,E}
+      8..11  S->{E,N,W,S}    12..15 W->{S,E,N,W}
+  G = full green, g = minor green, y = yellow, r = red.  If netconvert
+  reorders links for a different geometry the strings below must be
+  regenerated to match; scripts/build_sumo_scenarios.sh verifies the phase
+  count / config alignment.
 -->
 <additional>
     <tlLogic id="tl_1" type="static" programID="0" offset="0">
-        <phase duration="30" state="ggrr"/>  <!-- 0: N/S green,  E/W red -->
-        <phase duration="3"  state="yyrr"/>  <!-- 1: N/S yellow -->
-        <phase duration="30" state="rrgg"/>  <!-- 2: E/W green,  N/S red -->
-        <phase duration="3"  state="rryy"/>  <!-- 3: E/W yellow -->
-        <phase duration="2"  state="rrrr"/>  <!-- 4: all red -->
+        <phase duration="30" state="GGggrrrrGGggrrrr"/>  <!-- 0: N/S green -->
+        <phase duration="3"  state="yyyyrrrryyyyrrrr"/>  <!-- 1: N/S yellow -->
+        <phase duration="30" state="rrrrGGggrrrrGGgg"/>  <!-- 2: E/W green -->
+        <phase duration="3"  state="rrrryyyyrrrryyyy"/>  <!-- 3: E/W yellow -->
+        <phase duration="2"  state="rrrrrrrrrrrrrrrr"/>  <!-- 4: all red -->
     </tlLogic>
 </additional>

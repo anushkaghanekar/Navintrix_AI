@@ -20,11 +20,13 @@ echo "=== netconvert: $SCEN_DIR -> $NET_FILE ==="
 netconvert \
   --node-files "$SCEN_DIR/intersection.nod.xml" \
   --edge-files "$SCEN_DIR/intersection.edg.xml" \
-  --additional-files "$SCEN_DIR/intersection.add.xml" \
+  --tllogic-files "$SCEN_DIR/intersection.add.xml" \
   --output-file "$NET_FILE"
 
 echo "=== verifying tl_1 program vs configs/signal.yaml ==="
-python3 - "$NET_FILE" <<'PY'
+# Prefer the project venv (has pyyaml), else fall back to python3.
+if [ -x ".venv/bin/python" ]; then PYTHON=".venv/bin/python"; else PYTHON="python3"; fi
+"$PYTHON" - "$NET_FILE" <<'PY'
 import sys
 import xml.etree.ElementTree as ET
 import yaml
