@@ -14,27 +14,34 @@ from __future__ import annotations
 from copy import deepcopy
 from pathlib import Path
 from threading import RLock
-from time import time
+from time import monotonic, perf_counter, time
 
-from fastapi import BackgroundTasks, FastAPI, HTTPException, WebSocket, WebSocketDisconnect
+from fastapi import BackgroundTasks, FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
+from starlette.concurrency import run_in_threadpool
 
+from analytics.density import compute_density, load_density_weights
 from controller.adaptive_controller import AdaptiveController
 from controller.config import load_signal_config
 from controller.emergency_controller import EmergencyController
 from controller.fairness import FairnessTracker
 from controller.state_machine import SafetyStateMachine
-from counting.roi import load_roi_config
+from counting.roi import assign_road, load_roi_config
+from detection.detector import build_detector
 from emergency.priority import select_priority_emergency
 from emergency.trajectory import required_movement
+from emergency.tracker import EmergencyTracker
 from evaluation.experiments import FixedTimeController, NoFairnessTracker
 from simulation.sumo import load_scenario_config
 from simulation.traci_controller import run_simulation
+from tracking.bytetrack import VehicleTracker
 
 
 SIGNAL_CONFIG_PATH = "configs/signal.yaml"
 INTERSECTION_CONFIG_PATH = "configs/intersection.yaml"
+MODEL_CONFIG_PATH = "configs/model.yaml"
 DEFAULT_CONTROLLER_MODE = "ADAPTIVE"
 VALID_CONTROLLER_MODES = {"ADAPTIVE", "FIXED_TIME", "DENSITY_ONLY"}
+EMERGENCY_CLASSES = {"ambulance", "fire_truck", "police_vehicle"}
 
 app = FastAPI(title="Adaptive Traffic Signal Control API")
 
@@ -52,10 +59,14 @@ class _TrajectoryModule:
 class BackendRuntime:
     """Holds the latest live/demo state exposed by the API.
 
-    The first backend milestone is honest orchestration: routes return real
-    config/FSM/controller state, and simulation starts call the real SUMO
-    bridge. Per-step streaming can be added by teaching run_simulation to
-    accept a callback that writes into this object.
+    The runtime has two independent producers of state:
+      * the SUMO controller job, which fills aggregate simulation results;
+      * the live vision path, which accepts camera frames and runs the trained
+        YOLO model through tracking and emergency approach verification.
+
+    The detector is loaded lazily so importing the API remains lightweight and
+    the backend can still expose configuration/status routes on machines that
+    do not have the model weights installed.
     """
 
     def __init__(
@@ -66,12 +77,14 @@ class BackendRuntime:
         self.signal_config_path = signal_config_path
         self.intersection_config_path = intersection_config_path
         self._lock = RLock()
+        self._inference_lock = RLock()
         self.reset()
 
     def reset(self) -> None:
         with self._lock:
             self.signal_cfg = load_signal_config(self.signal_config_path)
             self.intersection_cfg = load_roi_config(self.intersection_config_path)
+            self.density_weights = load_density_weights(self.intersection_config_path)
             self.mode = DEFAULT_CONTROLLER_MODE
             self.running = False
             self.stop_requested = False
@@ -84,6 +97,13 @@ class BackendRuntime:
             self.latest_metrics = self._empty_metrics()
             self.latest_vehicles: list[dict] = []
             self.latest_emergency: dict | None = None
+            self.latest_detections: list[dict] = []
+            self.detector = None
+            self.live_tracker = VehicleTracker.from_config(MODEL_CONFIG_PATH)
+            self.emergency_tracker = EmergencyTracker.from_config(self.signal_cfg)
+            self.live_clock_origin: float | None = None
+            self.inference_frame_count = 0
+            self.last_inference_ms: float | None = None
 
     @property
     def roads(self) -> list[str]:
@@ -200,6 +220,192 @@ class BackendRuntime:
     def metrics(self) -> dict:
         with self._lock:
             return deepcopy(self.latest_metrics)
+
+    def reset_live_state(self) -> None:
+        """Clear frame-tracking state without resetting the SUMO controller."""
+        with self._inference_lock:
+            with self._lock:
+                self.live_tracker.reset()
+                self.emergency_tracker = EmergencyTracker.from_config(self.signal_cfg)
+                self.emergency_controller = EmergencyController(
+                    self.state_machine, _PriorityModule(), _TrajectoryModule()
+                )
+                self.live_clock_origin = None
+                self.latest_detections = []
+                self.latest_vehicles = []
+                self.latest_emergency = None
+                self.latest_metrics = self._empty_metrics()
+                self.controller_clock_seconds = 0.0
+                self.last_inference_ms = None
+
+    def inference_status(self) -> dict:
+        """Return model/inference health without forcing model loading."""
+        with self._lock:
+            weights_path = "models/best.pt"
+            if self.detector is not None:
+                weights_path = self.detector.weights_path
+            return {
+                "model_loaded": self.detector is not None,
+                "weights_path": weights_path,
+                "weights_present": Path(weights_path).exists(),
+                "frames_processed": self.inference_frame_count,
+                "last_inference_ms": self.last_inference_ms,
+                "confidence_threshold": (
+                    self.detector.confidence_threshold if self.detector is not None else None
+                ),
+            }
+
+    def _ensure_detector(self):
+        if self.detector is None:
+            try:
+                self.detector = build_detector(MODEL_CONFIG_PATH)
+            except Exception as exc:  # noqa: BLE001 - expose a useful API error
+                raise RuntimeError(
+                    "Unable to load the YOLO model from configs/model.yaml: "
+                    f"{exc}"
+                ) from exc
+        return self.detector
+
+    @staticmethod
+    def _serialize_detection(detection) -> dict:
+        return {
+            "class": detection.cls,
+            "cls": detection.cls,
+            "confidence": float(detection.confidence),
+            "bbox": {
+                "x1": float(detection.x1),
+                "y1": float(detection.y1),
+                "x2": float(detection.x2),
+                "y2": float(detection.y2),
+            },
+            "emergency": detection.cls in EMERGENCY_CLASSES,
+        }
+
+    @staticmethod
+    def _serialize_tracked_vehicle(vehicle) -> dict:
+        return {
+            "track_id": int(vehicle.track_id),
+            "class": vehicle.cls,
+            "cls": vehicle.cls,
+            "confidence": float(vehicle.confidence),
+            "bbox": (
+                {
+                    "x1": float(vehicle.bbox[0]),
+                    "y1": float(vehicle.bbox[1]),
+                    "x2": float(vehicle.bbox[2]),
+                    "y2": float(vehicle.bbox[3]),
+                }
+                if vehicle.bbox is not None
+                else None
+            ),
+            "center": {
+                "x": float(vehicle.current_position[0]),
+                "y": float(vehicle.current_position[1]),
+            },
+            "previous_center": (
+                {
+                    "x": float(vehicle.previous_position[0]),
+                    "y": float(vehicle.previous_position[1]),
+                }
+                if vehicle.previous_position is not None
+                else None
+            ),
+            "road": vehicle.road,
+            "movement": vehicle.movement,
+            "emergency": vehicle.cls in EMERGENCY_CLASSES,
+        }
+
+    @staticmethod
+    def _serialize_emergency_state(state) -> dict:
+        return {
+            "track_id": int(state.track_id),
+            "class": state.cls,
+            "road": state.road,
+            "movement": state.movement,
+            "distance_to_intersection": state.distance_to_intersection,
+            "approaching_intersection": bool(state.approaching_intersection),
+            "cleared": bool(state.cleared),
+        }
+
+    def _live_metrics(self, tracked_vehicles) -> dict:
+        counts_by_road: dict[str, dict[str, int]] = {
+            road: {} for road in self.roads
+        }
+        for vehicle in tracked_vehicles:
+            if vehicle.road in counts_by_road:
+                counts_by_road[vehicle.road][vehicle.cls] = (
+                    counts_by_road[vehicle.road].get(vehicle.cls, 0) + 1
+                )
+
+        metrics = self._empty_metrics()
+        for road, counts in counts_by_road.items():
+            metrics[road]["density"] = compute_density(counts, self.density_weights)
+        return metrics
+
+    def infer_frame(self, frame) -> dict:
+        """Run one camera frame through YOLO, tracking, and emergency logic.
+
+        The returned value is a complete dashboard snapshot plus the raw
+        frame detections. The model is protected by a lock because a single
+        YOLO instance should not be invoked concurrently by multiple clients.
+        """
+        started = perf_counter()
+        with self._inference_lock:
+            detector = self._ensure_detector()
+            detections = detector.detect(frame)
+
+            now = monotonic()
+            if self.live_clock_origin is None:
+                self.live_clock_origin = now
+            timestamp = max(0.0, now - self.live_clock_origin)
+
+            tracked = self.live_tracker.update(detections, timestamp)
+            for vehicle in tracked:
+                vehicle.road = assign_road(vehicle.current_position, self.intersection_cfg)
+
+            emergency_states = [
+                self.emergency_tracker.update(vehicle, self.intersection_cfg)
+                for vehicle in tracked
+                if vehicle.cls in EMERGENCY_CLASSES
+            ]
+            selected = select_priority_emergency(
+                emergency_states, self.state_machine.phase
+            )
+
+            # This preserves the safety state machine and emergency controller
+            # semantics for a camera stream. Normal adaptive phase selection
+            # remains owned by the controller/simulation loop.
+            with self._lock:
+                self.state_machine.tick(timestamp)
+                self.emergency_controller.handle(emergency_states, timestamp)
+
+            with self._lock:
+                self.latest_detections = [
+                    self._serialize_detection(detection) for detection in detections
+                ]
+                self.latest_vehicles = [
+                    self._serialize_tracked_vehicle(vehicle) for vehicle in tracked
+                ]
+                self.latest_emergency = (
+                    self._serialize_emergency_state(selected) if selected is not None else None
+                )
+                self.latest_metrics = self._live_metrics(tracked)
+                self.controller_clock_seconds = timestamp
+                self.inference_frame_count += 1
+                self.last_inference_ms = (perf_counter() - started) * 1000.0
+
+                payload = self.snapshot()
+                payload.update(
+                    {
+                        "detections": deepcopy(self.latest_detections),
+                        "inference_ms": self.last_inference_ms,
+                        "frame_size": {
+                            "width": int(frame.shape[1]),
+                            "height": int(frame.shape[0]),
+                        },
+                    }
+                )
+                return payload
 
     def status(self) -> dict:
         with self._lock:
@@ -318,14 +524,32 @@ class BackendRuntime:
         return {
             "traffic": self.traffic(),
             "vehicles": self.vehicles(),
+            "detections": deepcopy(self.latest_detections),
             "signals": self.signals(),
             "emergency": self.emergency(),
             "metrics": self.metrics(),
             "controller": self.status(),
+            "inference": self.inference_status(),
         }
 
 
 _RUNTIME = BackendRuntime()
+
+
+def _decode_image_payload(payload: bytes):
+    """Decode an HTTP/WebSocket image payload into a BGR OpenCV frame."""
+    if not payload:
+        raise ValueError("image payload is empty")
+    try:
+        import cv2
+        import numpy as np
+    except ImportError as exc:  # pragma: no cover - requirements provide both
+        raise RuntimeError("opencv-python and numpy are required for live inference") from exc
+
+    frame = cv2.imdecode(np.frombuffer(payload, dtype=np.uint8), cv2.IMREAD_COLOR)
+    if frame is None:
+        raise ValueError("payload is not a supported image")
+    return frame
 
 
 @app.get("/api/intersection")
@@ -360,6 +584,36 @@ def get_emergency():
 def get_metrics():
     """Return live density/queue/waiting-time/flow per road."""
     return _RUNTIME.metrics()
+
+
+@app.get("/api/inference/status")
+def inference_status():
+    """Return YOLO loading and live-frame processing status."""
+    return _RUNTIME.inference_status()
+
+
+@app.post("/api/inference/image")
+async def inference_image(request: Request):
+    """Run YOLO live inference on one encoded image.
+
+    The request body must be JPEG/PNG/WebP bytes. Sending raw image bytes
+    keeps this endpoint dependency-free for browser clients: use ``fetch``
+    with ``body: blob`` and the image MIME type as ``Content-Type``.
+    """
+    try:
+        frame = _decode_image_payload(await request.body())
+        return await run_in_threadpool(_RUNTIME.infer_frame, frame)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+
+@app.post("/api/inference/reset")
+def inference_reset():
+    """Reset live tracking when the frontend switches camera/video source."""
+    _RUNTIME.reset_live_state()
+    return _RUNTIME.inference_status()
 
 
 @app.get("/api/controller/status")
@@ -397,15 +651,29 @@ def controller_mode(mode: str):
 
 @app.websocket("/ws/live")
 async def websocket_live(websocket: WebSocket):
-    """Streams live vehicle counts, signal changes, emergency detections,
-    and metric updates. Clients send a lightweight ping/message to request
-    the latest snapshot.
+    """Stream dashboard state and accept encoded camera frames.
+
+    Text messages request the latest snapshot. Binary messages must contain
+    one JPEG/PNG/WebP frame; they are decoded, passed through YOLO/tracking,
+    and returned as a snapshot containing ``detections`` and inference timing.
     """
     await websocket.accept()
     try:
         await websocket.send_json(_RUNTIME.snapshot())
         while True:
-            await websocket.receive_text()
-            await websocket.send_json(_RUNTIME.snapshot())
+            message = await websocket.receive()
+            if message["type"] == "websocket.disconnect":
+                break
+            if message.get("bytes") is not None:
+                try:
+                    frame = _decode_image_payload(message["bytes"])
+                    result = await run_in_threadpool(_RUNTIME.infer_frame, frame)
+                    await websocket.send_json(result)
+                except ValueError as exc:
+                    await websocket.send_json({"error": str(exc), "status_code": 400})
+                except RuntimeError as exc:
+                    await websocket.send_json({"error": str(exc), "status_code": 503})
+            else:
+                await websocket.send_json(_RUNTIME.snapshot())
     except WebSocketDisconnect:
         pass

@@ -239,6 +239,7 @@ class TrackedVehicle:
     previous_position: tuple[float, float] | None
     first_seen_time: float
     last_seen_time: float
+    bbox: tuple[float, float, float, float] | None = None
     road: str | None = None          # filled in by counting/roi.py
     movement: str | None = None      # filled in by counting/movement.py
     queue_entry_time: float | None = None
@@ -467,4 +468,5 @@ class VehicleTracker:
             previous_position=track.previous_position,
             first_seen_time=float(track.first_seen),
             last_seen_time=float(track.last_seen),
+            bbox=track.kf.box(),
         )
