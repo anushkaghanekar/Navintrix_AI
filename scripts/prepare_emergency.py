@@ -73,6 +73,11 @@ _SPLIT_TO_DIR = {"train": "train", "valid": "valid", "val": "valid", "test": "te
 # ---- CONFIG ----
 
 
+def _normalize_class_name(value: str) -> str:
+    """Normalize export spelling so names like `Fire-Truck` are stable."""
+    return str(value).lower().strip().replace("-", "_").replace(" ", "_")
+
+
 def _load_emergency_config(config_path: str | Path) -> tuple[list[str], dict[str, str | None]]:
     """Return (classes.emergency, datasets.emergency.class_mapping).
 
@@ -87,7 +92,7 @@ def _load_emergency_config(config_path: str | Path) -> tuple[list[str], dict[str
         raise SystemExit(f"config error: {config_path} must define 'classes.emergency'")
     if not isinstance(emergency, list) or not emergency:
         raise SystemExit(f"config error: {config_path}: classes.emergency must be a non-empty list")
-    emergency = [str(name) for name in emergency]
+    emergency = [_normalize_class_name(name) for name in emergency]
 
     mapping: dict[str, str | None] = {}
     dataset_cfg = (cfg.get("datasets") or {}).get("emergency") or {}
@@ -98,21 +103,23 @@ def _load_emergency_config(config_path: str | Path) -> tuple[list[str], dict[str
             f"(source-class-name -> target-class-name | null)"
         )
     for source_name, target in raw_mapping.items():
+        source_name = _normalize_class_name(source_name)
         if target is None:
-            mapping[str(source_name)] = None
+            mapping[source_name] = None
             continue
-        target = str(target)
+        target = _normalize_class_name(target)
         if target not in emergency:
             raise SystemExit(
                 f"config error: class_mapping target {target!r} (for {source_name!r}) "
                 f"is not one of classes.emergency"
             )
-        mapping[str(source_name)] = target
+        mapping[source_name] = target
     return emergency, mapping
 
 
 def _target_for(source_name: str, emergency: list[str], mapping: dict[str, str | None]) -> int | None:
     """Return the target id (0..N) for a source class name, or None to drop."""
+    source_name = _normalize_class_name(source_name)
     if source_name in mapping:
         target = mapping[source_name]
         return None if target is None else emergency.index(target)
