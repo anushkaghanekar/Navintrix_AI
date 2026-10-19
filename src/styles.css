@@ -92,6 +92,10 @@ button { cursor: pointer; }
   margin-right: 5px;
   border-radius: 50%;
   background: var(--sage);
+  transition: background 0.2s ease;
+}
+.status-dot.offline {
+  background: #f87171;
 }
 
 /* ── Main ────────────────────────────────────────────────────── */

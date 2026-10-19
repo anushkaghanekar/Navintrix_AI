@@ -304,7 +304,29 @@ function App() {
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
+  const [backendStatus, setBackendStatus] = useState("checking");
   const ready = DIRECTIONS.every((d) => files[d]);
+
+  useEffect(() => {
+    let active = true;
+    const checkHealth = () => {
+      fetch(`${API_URL}/api/health`)
+        .then((res) => {
+          if (!active) return;
+          setBackendStatus(res.ok ? "online" : "offline");
+        })
+        .catch(() => {
+          if (!active) return;
+          setBackendStatus("offline");
+        });
+    };
+    checkHealth();
+    const interval = setInterval(checkHealth, 8000);
+    return () => {
+      active = false;
+      clearInterval(interval);
+    };
+  }, []);
 
   async function analyze() {
     setLoading(true);
@@ -315,10 +337,21 @@ function App() {
     DIRECTIONS.forEach((d) => form.append(`emergency_${d.toLowerCase()}`, emergency[d]));
     try {
       const res = await fetch(`${API_URL}/api/analyze`, { method: "POST", body: form });
-      if (!res.ok) throw new Error("Analysis failed — is the Python API running?");
+      if (!res.ok) {
+        const errorText = await res.text();
+        throw new Error(errorText || "Analysis failed — check the Python API logs.");
+      }
       setData(await res.json());
+      setBackendStatus("online");
     } catch (err) {
-      setError(err.message);
+      if (err.name === "TypeError" && err.message.toLowerCase().includes("fetch")) {
+        setError(
+          "Cannot connect to Python API (http://localhost:8000). Make sure the backend is running with: uvicorn api:app --reload --port 8000"
+        );
+        setBackendStatus("offline");
+      } else {
+        setError(err.message || "An error occurred during junction analysis.");
+      }
     } finally {
       setLoading(false);
     }
@@ -341,7 +374,8 @@ function App() {
           <a href="#evidence">Evidence</a>
         </nav>
         <div className="side-note">
-          <span className="status-dot" /> Model ready
+          <span className={`status-dot ${backendStatus === "offline" ? "offline" : ""}`} />{" "}
+          {backendStatus === "online" ? "Model ready" : backendStatus === "offline" ? "Backend offline" : "Connecting..."}
           <strong>YOLO26m</strong>
           <small>All inference runs locally on your machine. Nothing leaves your network.</small>
         </div>
