@@ -1,0 +1,11 @@
+services:
+  - type: web
+    name: signal-sense-api
+    runtime: python
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn api:app --host 0.0.0.0 --port $PORT
+    healthCheckPath: /api/health
+    envVars:
+      - key: CORS_ORIGINS
+        value: https://sihdemo-veds-projects-bf5972ad.vercel.app,http://localhost:5173

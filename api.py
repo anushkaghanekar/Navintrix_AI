@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import os
 from io import BytesIO
 from pathlib import Path
 
@@ -14,7 +15,14 @@ from app import DIRECTIONS, adaptive_green_times, analyze_direction, signal_phas
 app = FastAPI(title="Signal Sense API")
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:5173", "http://127.0.0.1:5173"],
+    allow_origins=[
+        origin.strip()
+        for origin in os.getenv(
+            "CORS_ORIGINS",
+            "http://localhost:5173,http://127.0.0.1:5173",
+        ).split(",")
+        if origin.strip()
+    ],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -49,7 +57,7 @@ async def read_upload(upload: UploadFile) -> Image.Image:
 
 @app.get("/api/health")
 def health() -> dict[str, str]:
-    return {"status": "ok", "model": "YOLO26m"}
+    return {"status": "ok", "model": os.getenv("MODEL_PATH", "yolo26n.pt")}
 
 
 @app.post("/api/analyze")

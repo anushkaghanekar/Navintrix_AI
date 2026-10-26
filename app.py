@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from io import BytesIO
+import os
 from pathlib import Path
 import time
 
@@ -11,7 +12,9 @@ from PIL import Image
 from ultralytics import YOLO
 
 
-MODEL_PATH = Path(__file__).with_name("yolo26m.pt")
+# The nano checkpoint is small enough for free-tier demo instances. Ultralytics
+# downloads it on first startup when it is not present in the working tree.
+MODEL_PATH = os.getenv("MODEL_PATH", "yolo26n.pt")
 SAMPLE_PATH = Path(__file__).with_name("inter.jpeg")
 DIRECTIONS = ("North", "East", "South", "West")
 VEHICLE_CLASSES = {"bicycle", "car", "motorcycle", "bus", "truck"}
@@ -71,7 +74,7 @@ class DirectionResult:
 
 @st.cache_resource(show_spinner=False)
 def load_model() -> YOLO:
-    return YOLO(str(MODEL_PATH))
+    return YOLO(MODEL_PATH)
 
 
 def read_image(uploaded_file) -> Image.Image:
